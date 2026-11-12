@@ -1,0 +1,16 @@
+bin/
+etc/
+lib/
+lib64/
+share/
+*.key
+*.enc
+.lock
+CACHEDIR.TAG
+*.log
+*.duckdb
+access_token.txt
+__pycache__/
+*.pyc
+lib64
+pyvenv.cfg

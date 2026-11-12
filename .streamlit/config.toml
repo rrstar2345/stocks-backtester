@@ -1,0 +1,29 @@
+[server]
+# Set the port number for the Streamlit server (default is 8501)
+port = 8501
+
+# Automatically open the browser when Streamlit starts
+headless = true
+
+# Enable CORS protection (set to false if facing cross-origin issues during local dev)
+enableCORS = false
+
+# Enable WebSocket compression
+enableWebsocketCompression = true
+
+# Maximum size of incoming file uploads in megabytes
+maxUploadSize = 200
+
+
+[browser]
+# Gather usage stats and telemetry sent to Streamlit developers (disabled)
+gatherUsageStats = false
+
+
+[theme]
+# Optional: Customize your app's primary color scheme
+primaryColor = "#FF4B4B"
+backgroundColor = "#FFFFFF"
+secondaryBackgroundColor = "#F0F2F6"
+textColor = "#262730"
+font = "sans serif"
