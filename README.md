@@ -13,13 +13,15 @@ A Streamlit app for backtesting a configurable **RSI + ADX** strategy on Indian 
 
 ## Setup
 
+The project uses [uv](https://docs.astral.sh/uv/getting-started/installation/) (check with `uv --version`).
+
 ```bash
-python -m venv .venv && source .venv/bin/activate
-pip install -r requirements.txt
-streamlit run app.py
+uv python install 3.13   # only if you have no Python 3.11+
+uv sync                  # creates .venv and installs locked dependencies
+uv run streamlit run app.py
 ```
 
-The app runs on port 8501 (see `.streamlit/config.toml`).
+The app runs on port 8548 (see `.streamlit/config.toml`). Dependencies live in `pyproject.toml` and are locked in `uv.lock`; add one with `uv add <package>`, and install dev tools (`ty`, `pytest`) with `uv sync` (the dev group is included by default).
 
 ### Fyers authentication
 
@@ -91,9 +93,9 @@ src/
   indicators.py        RSI, ADX / DI, EMA, SMA (Wilder conventions)
   strategies.py        Strategy registry and the RSI + ADX strategy
   backtester.py        Simulation engine, charges, performance summary
-fyers_apiv3-3.2.1/     Fyers SDK (reference)
-fyers-openalgo/        OpenAlgo Fyers integration (reference)
-reference/             Original live-trading strategy (reference)
+.streamlit/config.toml Server and theme settings
+pyproject.toml         Dependencies and tool config (uv)
+uv.lock                Locked dependency versions
 ```
 
 Local files created at runtime (all git-ignored): `market_data.duckdb`, the encrypted credentials and key files, and the access token file.

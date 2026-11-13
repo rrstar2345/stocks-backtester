@@ -5,7 +5,7 @@ lib64/
 share/
 *.key
 *.enc
-.lock
+*.lock
 CACHEDIR.TAG
 *.log
 *.duckdb
@@ -14,3 +14,8 @@ __pycache__/
 *.pyc
 lib64
 pyvenv.cfg
+
+.venv/
+.ruff_cache/
+.pytest_cache/
+

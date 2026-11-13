@@ -1,0 +1,27 @@
+[project]
+name = "stocks-backtester"
+version = "0.1.0"
+description = "Streamlit app for backtesting an RSI + ADX strategy on Indian markets with Fyers API v3 data."
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "fyers-apiv3>=3.2.1",
+    "duckdb>=1.0.0",
+    "pandas>=2.0.0",
+    "numpy>=1.24.0",
+    "streamlit>=1.67.0",
+    # Still used by the current equity chart; drop once it moves to ECharts.
+    "plotly>=5.18.0",
+    "cryptography>=41.0.0",
+    "requests>=2.31.0",
+]
+
+[dependency-groups]
+dev = [
+    "ty>=0.0.103",
+    "pytest>=9.0.0",
+]
+
+[tool.uv]
+# Application, not a library: install dependencies only, not the project itself.
+package = false

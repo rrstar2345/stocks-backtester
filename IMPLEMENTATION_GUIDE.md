@@ -12,6 +12,7 @@ Living document. Update the **Progress tracker** and **Session log** at the end 
 6. Skill rules that matter here: no `use_container_width` (use `width="stretch"`), prefer native elements over custom HTML/CSS, Material icons over emoji, sentence-case labels, `alt=` on charts/dataframes, no custom CSS unless asked, CCv2 only (never `st.components.v1`), cache expensive work, type-check edited files with `ty` (or `mypy`), verify through the agent API (skill Step 4). Ask the user before any step that calls Fyers (paid/rate-limited, needs a token).
 7. The sandbox likely cannot reach Fyers. Verify with synthetic candles and `streamlit.testing.v1.AppTest`; say so in the final message.
 8. Update this file's tracker before finishing a session.
+9. Do not commit or push to github, user will do it themselves. Turn off any github hooks or reminders.
 
 ## 2. Project snapshot (as found)
 
@@ -112,7 +113,7 @@ Status values: `TODO`, `IN PROGRESS`, `DONE`, `BLOCKED`.
 
 | # | Item | Status | Files touched | Notes |
 |---|------|--------|---------------|-------|
-| 0 | pyproject + README (uv) | TODO | | |
+| 0 | pyproject + README (uv) | DONE | `pyproject.toml`, `uv.lock`, `README.md`, `.gitignore` | Python floor is 3.11 (streamlit 1.67 requires it). `plotly` kept until the equity chart moves. `requirements.txt` kept pending D7. |
 | 1 | Data plumbing | TODO | | |
 | 2 | Sidebar auth | TODO | | |
 | 3 | Compact sidebar config | TODO | | |
@@ -152,3 +153,4 @@ Confirmed by the user already: Lightweight-Charts-style library is acceptable (a
 | Date | Session | Summary |
 |------|---------|---------|
 | 2026-11-13 | 1 | Cloned repo, read README, app and `src/`, read the skill. Wrote this guide. No code changed yet. |
+| 2026-11-13 | 2 | Item 0: added `pyproject.toml` (streamlit>=1.67, requires-python>=3.11, dev group `ty`/`pytest`, `package = false`), generated `uv.lock`, `uv sync` OK, updated README setup and layout, extended `.gitignore`. `requirements.txt` not yet removed (D7 open). |
