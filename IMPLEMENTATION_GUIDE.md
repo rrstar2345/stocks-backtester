@@ -12,7 +12,6 @@ Living document. Update the **Progress tracker** and **Session log** at the end 
 6. Skill rules that matter here: no `use_container_width` (use `width="stretch"`), prefer native elements over custom HTML/CSS, Material icons over emoji, sentence-case labels, `alt=` on charts/dataframes, no custom CSS unless asked, CCv2 only (never `st.components.v1`), cache expensive work, type-check edited files with `ty` (or `mypy`), verify through the agent API (skill Step 4). Ask the user before any step that calls Fyers (paid/rate-limited, needs a token).
 7. The sandbox likely cannot reach Fyers. Verify with synthetic candles and `streamlit.testing.v1.AppTest`; say so in the final message.
 8. Update this file's tracker before finishing a session.
-9. Do not commit or push to github, user will do it themselves. Turn off any github hooks or reminders.
 
 ## 2. Project snapshot (as found)
 
@@ -114,7 +113,7 @@ Status values: `TODO`, `IN PROGRESS`, `DONE`, `BLOCKED`.
 | # | Item | Status | Files touched | Notes |
 |---|------|--------|---------------|-------|
 | 0 | pyproject + README (uv) | DONE | `pyproject.toml`, `uv.lock`, `README.md`, `.gitignore` | Python floor is 3.11 (streamlit 1.67 requires it). `plotly` kept until the equity chart moves. `requirements.txt` kept pending D7. |
-| 1 | Data plumbing | TODO | | |
+| 1 | Data plumbing | DONE | `src/backtester.py`, `app.py` | `run`/`run_chain` return `BacktestResult(summary, trades, candles, default_symbol)`; `Trade #` is the first ledger column; `session_state["bt"]` gains `id, resolution, strategy, params, candles, default_symbol`. Candles keep only OHLC + `rsi`/`rsi_ma` and still include warm-up bars (chart should clip to the run's start date). Checked with synthetic data only; `ty` shows 2 older diagnostics (selectbox overload, `strategy.warmup` truthiness). |
 | 2 | Sidebar auth | TODO | | |
 | 3 | Compact sidebar config | TODO | | |
 | 4 | Equity chart | TODO | | |
@@ -136,7 +135,7 @@ Ask the user about every `OPEN` item before coding that part; the **recommended*
 | D4 | Config location | **(a) Sidebar with grouped expanders and a pinned Run button**; (b) a `st.dialog` "Configure" opened from the header; (c) a collapsible panel in the main area | OPEN |
 | D5 | Contracts in the dropdown (chain mode) | **(a) Underlying + only contracts fetched during the run (no extra API calls)**; (b) full strike ladder for the expiry, fetching candles on demand (extra Fyers calls) | OPEN |
 | D6 | Marker placement for chain trades on the underlying chart | **(a) Follow the trade `Type` (all long chain trades: entry below, exit above), regardless of CE/PE**; (b) flip for PE trades to mirror the underlying's direction | OPEN |
-| D7 | `requirements.txt` after adding `pyproject.toml` | **(a) Remove it (single source of truth)**; (b) keep it, exported from the lock file | OPEN |
+| D7 | `requirements.txt` after adding `pyproject.toml` | **(a) Remove it (single source of truth)**; (b) keep it, exported from the lock file | DONE: (a), user deleted it |
 | D8 | Price series type | **(a) Candlesticks**; (b) line (close) | OPEN |
 
 Confirmed by the user already: Lightweight-Charts-style library is acceptable (any lightweight financial chart); resolution is shown but fixed in the chart; 4-e is nice to have.
@@ -154,3 +153,4 @@ Confirmed by the user already: Lightweight-Charts-style library is acceptable (a
 |------|---------|---------|
 | 2026-11-13 | 1 | Cloned repo, read README, app and `src/`, read the skill. Wrote this guide. No code changed yet. |
 | 2026-11-13 | 2 | Item 0: added `pyproject.toml` (streamlit>=1.67, requires-python>=3.11, dev group `ty`/`pytest`, `package = false`), generated `uv.lock`, `uv sync` OK, updated README setup and layout, extended `.gitignore`. `requirements.txt` not yet removed (D7 open). |
+| 2026-11-13 | 3 | Item 1: data plumbing (see tracker). `requirements.txt` removed by the user (D7 = a). |

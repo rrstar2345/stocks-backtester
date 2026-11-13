@@ -1,3 +1,4 @@
+import uuid
 from datetime import date, time as dtime, timedelta
 
 import pandas as pd
@@ -268,11 +269,12 @@ else:
                         warmup_days=warmup_days(strategy, params, bar_minutes(resolution)),
                         progress=lambda f, t: prog.progress(min(max(f, 0.0), 1.0), text=t),
                         use_cache=not refresh)
-                    summary, trades_df, _ = engine.run_chain(chain, strategy, params, cfg)
+                    res = engine.run_chain(chain, strategy, params, cfg)
                     st.session_state["bt"] = dict(
+                        id=uuid.uuid4().hex, resolution=resolution, strategy=strategy.name, params=params,
                         label=f"{chain_cfg['underlying']} · {chain_cfg['expiry_choice']} expiry · {chain_cfg['strike_choice']}",
-                        n=len(chain.underlying), summary=summary, trades=trades_df, info=chain.info,
-                        data=chain.info["Data source"])
+                        n=len(chain.underlying), summary=res.summary, trades=res.trades, info=chain.info,
+                        data=chain.info["Data source"], candles=res.candles, default_symbol=res.default_symbol)
                 except Exception as e:
                     st.error(str(e))
                 prog.empty()
@@ -290,9 +292,11 @@ else:
                 if df_hist.empty:
                     st.error("No historical data found for the selected range/symbol.")
                 else:
-                    summary, trades_df, _ = engine.run(df_hist, strategy, params, cfg, symbol=target_symbol)
-                    st.session_state["bt"] = dict(label=target_symbol, n=len(df_hist), summary=summary,
-                                                  trades=trades_df, info=None, data=stats)
+                    res = engine.run(df_hist, strategy, params, cfg, symbol=target_symbol)
+                    st.session_state["bt"] = dict(
+                        id=uuid.uuid4().hex, resolution=resolution, strategy=strategy.name, params=params,
+                        label=target_symbol, n=len(df_hist), summary=res.summary, trades=res.trades,
+                        info=None, data=stats, candles=res.candles, default_symbol=res.default_symbol)
 
     bt = st.session_state.get("bt")
     if bt:

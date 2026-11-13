@@ -10,6 +10,9 @@ from src.strategies import Strategy
 
 RESOLUTIONS = ["1", "2", "3", "5", "10", "15", "20", "30", "60", "120", "240", "D"]
 SIGNALS = ("long_entry", "long_exit", "short_entry", "short_exit")
+# Columns kept per symbol for charting (indicator columns only when the strategy produced them).
+CANDLE_COLS = ("timestamp", "open", "high", "low", "close")
+INDICATOR_COLS = ("rsi", "rsi_ma")
 
 
 def bar_minutes(resolution) -> Optional[int]:
@@ -51,6 +54,20 @@ def _level(entry, rule, side, is_target):
     return entry + dist if favourable else entry - dist
 
 
+@dataclass
+class BacktestResult:
+    summary: dict
+    trades: pd.DataFrame
+    candles: dict                      # symbol -> slim candles (OHLC + chart indicators)
+    default_symbol: str                # single instrument, or the underlying spot in chain mode
+
+
+def _slim(df):
+    """Only the columns the charts need, so session state stays small."""
+    keep = [c for c in CANDLE_COLS + INDICATOR_COLS if c in df.columns]
+    return df[keep].reset_index(drop=True)
+
+
 def _pack(df, ts=None):
     """Arrays for the simulator. With `ts`, the candles are aligned to that timeline: bars that
     do not exist are flat at the previous close and flagged has=False (no signals, no entries)."""
@@ -78,20 +95,27 @@ class BacktestEngine:
         df = strategy.compute(df.reset_index(drop=True), **params)
         series = {symbol: _pack(df)}
         trades, skipped = self._simulate(df["timestamp"], series, lambda i: [symbol], cfg)
-        return self._summary(trades, skipped), trades, df
+        return BacktestResult(self._summary(trades, skipped), trades, {symbol: _slim(df)}, symbol)
 
     # -- rolling option chain: the contract is re-selected on every bar from the underlying's LTP
     def run_chain(self, chain, strategy: Strategy, params: dict, cfg: ExecConfig):
         ts = chain.underlying["timestamp"]
-        series = {sym: _pack(strategy.compute(df.reset_index(drop=True), **params), ts)
-                  for sym, df in chain.contracts.items()}
+        computed = {sym: strategy.compute(df.reset_index(drop=True), **params)
+                    for sym, df in chain.contracts.items()}
+        series = {sym: _pack(df, ts) for sym, df in computed.items()}
         sels = list(chain.selection.values())
 
         def candidates(i):
             return [s[i] for s in sels if s[i] in series]
 
         trades, skipped = self._simulate(ts, series, candidates, cfg)
-        return self._summary(trades, skipped), trades, chain.underlying
+
+        # The default chart shows the underlying, so its indicators use the same parameters
+        # (they are not what traded; the contracts' own indicators are).
+        spot = chain.info.get("Spot symbol", "underlying")
+        candles = {spot: _slim(strategy.compute(chain.underlying.reset_index(drop=True), **params))}
+        candles.update({sym: _slim(df) for sym, df in computed.items()})
+        return BacktestResult(self._summary(trades, skipped), trades, candles, spot)
 
     def _simulate(self, ts, S, candidates, cfg):
         n = len(ts)
@@ -182,6 +206,7 @@ class BacktestEngine:
 
         trades = pd.DataFrame(rows)
         if not trades.empty:
+            trades.insert(0, "Trade #", np.arange(1, len(trades) + 1))  # rows are in exit order
             trades["Cumulative Capital"] = self.initial_capital + trades["Net PnL"].cumsum()
         return trades, skipped
 
