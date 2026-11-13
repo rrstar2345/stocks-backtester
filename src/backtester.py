@@ -1,130 +1,211 @@
-import pandas as pd
+import math
+from dataclasses import dataclass
+from datetime import time as dtime
+from typing import Optional
+
 import numpy as np
-from datetime import datetime, timedelta
-from src.database import fetch_candles_from_db, fetch_history_fyers
+import pandas as pd
 
-def get_expiry_dates(fyers_client, symbol="NSE:NIFTY50-INDEX"):
-    try:
-        # Fyers API v3 optionchain input payload structure
-        data = {
-            "symbol": symbol,
-            "strikecount": 10,
-            "timestamp": ""
-        }
-        response = fyers_client.optionchain(data=data)
-        if response.get("s") == "ok":
-            expiries = response.get("data", {}).get("expiryData", [])
-            return expiries
-    except Exception as e:
-        print(f"Option chain error: {e}")
-    return []
+from src.strategies import Strategy
 
-def resolve_option_symbols(underlying_symbol, expiry_date_str, spot_price, strike_range=5, step=50):
-    """
-    Dynamically generates Call and Put option symbols for given strike prices
-    surrounding the ATM spot price. Fyers format: NSE:NIFTY26NOV2424000CE
-    """
-    atm_strike = round(spot_price / step) * step
-    strikes = [atm_strike + (i * step) for i in range(-strike_range, strike_range + 1)]
-    
-    # Parse expiry string to format code (e.g. 24NOV24)
-    dt = datetime.strptime(expiry_date_str, "%d-%b-%Y")
-    yy = dt.strftime("%y")
-    mmm = dt.strftime("%b").upper()
-    dd = dt.strftime("%d")
-    
-    # Base index prefix extraction (e.g. NSE:NIFTY50-INDEX -> NIFTY)
-    prefix = underlying_symbol.split(":")[1].split("-")[0]
-    if "NIFTY" in prefix:
-        prefix = "NIFTY"
-    elif "BANKNIFTY" in prefix:
-        prefix = "BANKNIFTY"
+RESOLUTIONS = ["1", "2", "3", "5", "10", "15", "20", "30", "60", "120", "240", "D"]
+SIGNALS = ("long_entry", "long_exit", "short_entry", "short_exit")
 
-    option_symbols = []
-    for strike in strikes:
-        ce_symbol = f"NSE:{prefix}{yy}{mmm}{dd}{int(strike)}CE"
-        pe_symbol = f"NSE:{prefix}{yy}{mmm}{dd}{int(strike)}PE"
-        option_symbols.append((strike, ce_symbol, pe_symbol))
-        
-    return option_symbols
+
+def bar_minutes(resolution) -> Optional[int]:
+    """Bar length in minutes, None for daily."""
+    return None if str(resolution).upper() in ("D", "1D") else int(resolution)
+
+
+def warmup_days(strategy: Strategy, params: dict, minutes: Optional[int]) -> int:
+    """Calendar days of extra history so indicators are warm on the first bar of the range."""
+    bars = strategy.warmup(params) if strategy.warmup else 50
+    per_day = max(1, 375 // minutes) if minutes else 1
+    days = int(math.ceil(bars / per_day) * 1.5) + 4
+    return max(10, math.ceil(days / 10) * 10)  # bucketed: tweaking a length rarely changes the fetch range
+
+
+@dataclass
+class ExecConfig:
+    direction: str = "long"            # "long" | "short" | "both"
+    target: Optional[tuple] = None     # (kind, value) kind: "points" | "percent"
+    stop: Optional[tuple] = None
+    sizing: str = "capital"            # "capital": floor(capital / (price*lot)) lots | "fixed"
+    lot_size: int = 1
+    fixed_qty: int = 1
+    bar_minutes: Optional[int] = None  # None = daily bars (no intraday window)
+    square_off: bool = True            # flat by `square_off_at` every day (intraday only)
+    window_start: dtime = dtime(9, 15)
+    square_off_at: dtime = dtime(15, 29)
+    brokerage: float = 20.0            # flat, per order (a round trip is 2 orders)
+    govt_pct: float = 0.05             # % of sell-side turnover
+
+
+def _level(entry, rule, side, is_target):
+    """Absolute price for a target / stop rule, or None when switched off."""
+    if not rule or not rule[1]:
+        return None
+    kind, value = rule
+    dist = value if kind == "points" else entry * value / 100.0
+    favourable = (side == 1) == is_target  # long target / short stop sit above entry
+    return entry + dist if favourable else entry - dist
+
+
+def _pack(df, ts=None):
+    """Arrays for the simulator. With `ts`, the candles are aligned to that timeline: bars that
+    do not exist are flat at the previous close and flagged has=False (no signals, no entries)."""
+    if ts is not None:
+        df = df.set_index("timestamp").reindex(pd.DatetimeIndex(ts))
+    has = df["close"].notna().to_numpy()
+    close = df["close"].ffill()
+    out = {k: df[k].where(has, close).to_numpy(float) for k in ("open", "high", "low")}
+    out["close"], out["has"] = close.to_numpy(float), has
+    for k in SIGNALS:
+        out[k] = df[k].eq(True).to_numpy()
+    return out
+
 
 class BacktestEngine:
+    """Signals are read on bar close and filled at the next bar's open. Targets and stops are
+    checked against each bar's high/low (stop first when both are touched in the same bar;
+    gaps fill at the open)."""
+
     def __init__(self, initial_capital=100000.0):
         self.initial_capital = initial_capital
-        
-    def run_sma_crossover(self, df, fast_window=9, slow_window=21, qty=50):
-        df = df.copy()
-        df["fast_sma"] = df["close"].rolling(fast_window).mean()
-        df["slow_sma"] = df["close"].rolling(slow_window).mean()
-        
-        df["signal"] = 0
-        df.loc[df["fast_sma"] > df["slow_sma"], "signal"] = 1
-        df.loc[df["fast_sma"] < df["slow_sma"], "signal"] = -1
-        df["position"] = df["signal"].shift(1).fillna(0)
-        
-        trades = []
-        cash = self.initial_capital
-        in_trade = False
-        entry_price = 0
-        entry_time = None
-        trade_type = None
-        
-        for i in range(1, len(df)):
-            row = df.iloc[i]
-            prev_pos = df.iloc[i-1]["position"]
-            curr_pos = row["position"]
-            
-            if curr_pos != prev_pos:
-                # Close existing trade
-                if in_trade:
-                    exit_price = row["open"]
-                    pnl = (exit_price - entry_price) * qty if trade_type == "LONG" else (entry_price - exit_price) * qty
-                    cash += pnl
-                    trades.append({
-                        "Entry Time": entry_time,
-                        "Exit Time": row["timestamp"] if "timestamp" in row else i,
-                        "Type": trade_type,
-                        "Entry Price": entry_price,
-                        "Exit Price": exit_price,
-                        "Qty": qty,
-                        "PnL": pnl,
-                        "Return (%)": (pnl / (entry_price * qty)) * 100,
-                        "Cumulative Capital": cash
-                    })
-                    in_trade = False
-                
-                # Open new trade
-                if curr_pos == 1:
-                    entry_price = row["open"]
-                    entry_time = row["timestamp"] if "timestamp" in row else i
-                    trade_type = "LONG"
-                    in_trade = True
-                elif curr_pos == -1:
-                    entry_price = row["open"]
-                    entry_time = row["timestamp"] if "timestamp" in row else i
-                    trade_type = "SHORT"
-                    in_trade = True
-                    
-        trades_df = pd.DataFrame(trades)
-        
-        # Summary Statistics
-        total_trades = len(trades_df)
-        winning_trades = len(trades_df[trades_df["PnL"] > 0]) if total_trades > 0 else 0
-        win_rate = (winning_trades / total_trades * 100) if total_trades > 0 else 0
-        net_profit = trades_df["PnL"].sum() if total_trades > 0 else 0
-        max_drawdown = 0
-        if total_trades > 0:
-            peak = trades_df["Cumulative Capital"].cummax()
-            dd = (trades_df["Cumulative Capital"] - peak) / peak * 100
-            max_drawdown = dd.min()
 
-        summary = {
+    # -- single instrument
+    def run(self, df, strategy: Strategy, params: dict, cfg: ExecConfig, symbol=""):
+        df = strategy.compute(df.reset_index(drop=True), **params)
+        series = {symbol: _pack(df)}
+        trades, skipped = self._simulate(df["timestamp"], series, lambda i: [symbol], cfg)
+        return self._summary(trades, skipped), trades, df
+
+    # -- rolling option chain: the contract is re-selected on every bar from the underlying's LTP
+    def run_chain(self, chain, strategy: Strategy, params: dict, cfg: ExecConfig):
+        ts = chain.underlying["timestamp"]
+        series = {sym: _pack(strategy.compute(df.reset_index(drop=True), **params), ts)
+                  for sym, df in chain.contracts.items()}
+        sels = list(chain.selection.values())
+
+        def candidates(i):
+            return [s[i] for s in sels if s[i] in series]
+
+        trades, skipped = self._simulate(ts, series, candidates, cfg)
+        return self._summary(trades, skipped), trades, chain.underlying
+
+    def _simulate(self, ts, S, candidates, cfg):
+        n = len(ts)
+        intraday = cfg.bar_minutes is not None
+        sq = cfg.square_off and intraday
+        day = ts.dt.normalize().to_numpy()
+        close_min = (ts.dt.hour * 60 + ts.dt.minute + (cfg.bar_minutes or 0)).to_numpy()
+        win_start = cfg.window_start.hour * 60 + cfg.window_start.minute
+        sq_min = cfg.square_off_at.hour * 60 + cfg.square_off_at.minute
+        can_long, can_short = cfg.direction in ("long", "both"), cfg.direction in ("short", "both")
+
+        rows, skipped = [], 0
+        pos = entry_i = qty = 0
+        cur = None
+        entry_px = stop_px = target_px = 0.0
+        pending, pending_exit = None, False
+
+        def close(i, price, reason):
+            nonlocal pos
+            gross = (price - entry_px) * qty * pos
+            brokerage = cfg.brokerage * 2
+            govt = (price if pos == 1 else entry_px) * qty * cfg.govt_pct / 100.0
+            net = gross - brokerage - govt
+            rows.append({
+                "Symbol": cur, "Entry Time": ts[entry_i], "Exit Time": ts[i],
+                "Type": "LONG" if pos == 1 else "SHORT", "Entry Price": entry_px,
+                "Exit Price": price, "Qty": qty, "Gross PnL": gross, "Brokerage": brokerage,
+                "Govt Charges": govt, "Total Charges": brokerage + govt, "Net PnL": net,
+                "Return (%)": net / (entry_px * qty) * 100, "Exit Reason": reason,
+            })
+            pos = 0
+
+        for i in range(n):
+            # 1. fills at this bar's open, from signals on the previous bar's close
+            if pos and pending_exit:
+                close(i, S[cur]["open"][i], "Signal")
+            pending_exit = False
+            if pos == 0 and pending and not (sq and day[i] != day[i - 1]):
+                key, side = pending
+                a = S[key]
+                price = a["open"][i]
+                if a["has"][i] and not np.isnan(price):
+                    q = (cfg.fixed_qty if cfg.sizing == "fixed"
+                         else int(self.initial_capital // (price * cfg.lot_size)) * cfg.lot_size)
+                    if q < 1:
+                        skipped += 1
+                    else:
+                        pos, cur, qty, entry_px, entry_i = side, key, q, price, i
+                        stop_px = _level(price, cfg.stop, pos, False)
+                        target_px = _level(price, cfg.target, pos, True)
+            pending = None
+
+            # 2. stop / target inside this bar
+            if pos:
+                a = S[cur]
+                o, h, l = a["open"][i], a["high"][i], a["low"][i]
+                if pos == 1:
+                    if stop_px is not None and l <= stop_px:
+                        close(i, min(o, stop_px), "Stop Loss")
+                    elif target_px is not None and h >= target_px:
+                        close(i, max(o, target_px), "Target")
+                else:
+                    if stop_px is not None and h >= stop_px:
+                        close(i, max(o, stop_px), "Stop Loss")
+                    elif target_px is not None and l <= target_px:
+                        close(i, min(o, target_px), "Target")
+
+            # 3. intraday square-off (first bar closing at/after the time, or last bar of the day)
+            if pos and sq and (close_min[i] >= sq_min or i == n - 1 or day[i + 1] != day[i]):
+                close(i, S[cur]["close"][i], "Square-off")
+
+            # 4. signals on this bar's close
+            if pos:
+                a = S[cur]
+                if a["long_exit"][i] if pos == 1 else a["short_exit"][i]:
+                    pending_exit = True
+            if (pos == 0 or pending_exit) and (not sq or win_start <= close_min[i] < sq_min):
+                for key in candidates(i):
+                    if can_long and S[key]["long_entry"][i]:
+                        pending = (key, 1)
+                        break
+                    if can_short and S[key]["short_entry"][i]:
+                        pending = (key, -1)
+                        break
+
+        if pos:
+            close(n - 1, S[cur]["close"][n - 1], "End of data")
+
+        trades = pd.DataFrame(rows)
+        if not trades.empty:
+            trades["Cumulative Capital"] = self.initial_capital + trades["Net PnL"].cumsum()
+        return trades, skipped
+
+    def _summary(self, t, skipped):
+        total = len(t)
+        col = lambda c: float(t[c].sum()) if total else 0.0
+        wins = t.loc[t["Net PnL"] > 0, "Net PnL"].sum() if total else 0.0
+        losses = -t.loc[t["Net PnL"] < 0, "Net PnL"].sum() if total else 0.0
+        max_dd = 0.0
+        if total:
+            equity = pd.concat([pd.Series([self.initial_capital]), t["Cumulative Capital"]])
+            max_dd = float(((equity - equity.cummax()) / equity.cummax() * 100).min())
+        net = col("Net PnL")
+        return {
             "Initial Capital": self.initial_capital,
-            "Final Capital": self.initial_capital + net_profit,
-            "Net Profit / Loss": net_profit,
-            "Total Trades": total_trades,
-            "Win Rate (%)": win_rate,
-            "Max Drawdown (%)": max_drawdown
+            "Final Capital": self.initial_capital + net,
+            "Gross Profit / Loss": col("Gross PnL"),
+            "Brokerage": col("Brokerage"),
+            "Govt Charges": col("Govt Charges"),
+            "Total Charges": col("Total Charges"),
+            "Net Profit / Loss": net,
+            "Total Trades": total,
+            "Win Rate (%)": (t["Net PnL"] > 0).mean() * 100 if total else 0.0,
+            "Profit Factor": (wins / losses) if losses > 0 else (float("inf") if wins > 0 else 0.0),
+            "Max Drawdown (%)": max_dd,
+            "Skipped (insufficient capital)": skipped,
         }
-        
-        return summary, trades_df, df

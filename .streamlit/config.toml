@@ -1,9 +1,9 @@
 [server]
 # Set the port number for the Streamlit server (default is 8501)
-port = 8501
+port = 8548
 
 # Automatically open the browser when Streamlit starts
-headless = true
+headless = false
 
 # Enable CORS protection (set to false if facing cross-origin issues during local dev)
 enableCORS = false
