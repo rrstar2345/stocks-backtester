@@ -1,8 +1,0 @@
-fyers-apiv3>=3.2.1
-duckdb>=1.0.0
-pandas>=2.0.0
-numpy>=1.24.0
-streamlit>=1.35.0
-plotly>=5.18.0
-cryptography>=41.0.0
-requests>=2.31.0
