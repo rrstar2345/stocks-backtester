@@ -5,79 +5,19 @@ import pandas as pd
 import plotly.express as px
 import streamlit as st
 
-from src import optionchain, symbols
-from src.auth import save_credentials, load_credentials, get_auth_url, generate_access_token, get_fyers_client
+from src import auth_ui, optionchain, symbols
+from src.auth import get_fyers_client
 from src.backtester import BacktestEngine, ExecConfig, RESOLUTIONS, bar_minutes, warmup_days
 from src.database import fetch_history_fyers, fetch_candles_from_db
 from src.strategies import STRATEGIES
 
-st.set_page_config(page_title="Fyers Algorithmic Backtesting Dashboard", layout="wide")
-st.title("📈 Fyers API v3 DuckDB Backtesting Engine")
+st.set_page_config(page_title="Fyers backtesting dashboard", page_icon=":material/candlestick_chart:", layout="wide")
+st.title("Fyers API v3 DuckDB backtesting engine")
 
-# --- Authentication Sidebar ---
-st.sidebar.header("🔐 Fyers API Authentication")
-saved_cred = load_credentials()
-
-with st.sidebar.form("auth_form"):
-    app_id = st.text_input("App ID (Client ID)", value=saved_cred["client_id"] if saved_cred else "")
-    secret_id = st.text_input("Secret ID", type="password", value=saved_cred["secret_id"] if saved_cred else "")
-    redirect_uri = st.text_input("Redirect URL", value=saved_cred["redirect_uri"] if saved_cred else "https://trade.fyers.in/api-login/redirect-uri/index.html")
-    save_btn = st.form_submit_button("Save Credentials")
-
-    if save_btn and app_id and secret_id:
-        save_credentials(app_id, secret_id, redirect_uri)
-        st.success("Credentials securely encrypted and saved locally!")
-
-if app_id and redirect_uri:
-    st.sidebar.subheader("Step 1: Get Authorization Code")
-    auth_url = get_auth_url(app_id, redirect_uri)
-    st.sidebar.markdown(f"[Click here to login & authorize]({auth_url})", unsafe_allow_html=True)
-
-    auth_code_input = st.sidebar.text_input("Paste Auth Code from Redirect URL")
-    if st.sidebar.button("Generate Access Token"):
-        try:
-            generate_access_token(app_id, secret_id, redirect_uri, auth_code_input)
-            st.sidebar.success("Access Token generated and saved successfully!")
-        except Exception as e:
-            st.sidebar.error(f"Error: {e}")
-
-# --- Symbol master (downloaded once a day, cached) ---
-st.sidebar.divider()
-st.sidebar.subheader("Symbol master")
-try:
-    master = symbols.load_master(symbols.today_ist())
-    st.sidebar.caption(f"{len(master):,} symbols loaded for {symbols.today_ist()}")
-except Exception as e:
-    master = None
-    st.sidebar.error(f"Symbol download failed: {e}")
-if st.sidebar.button("Refresh symbols"):
-    symbols.load_master.clear()
-    st.rerun()
-
-
-st.markdown("""
-<style>
-.kpi{border-radius:14px;padding:14px 16px;border:1px solid rgba(128,128,128,.18);border-left:6px solid var(--c);
-     background:linear-gradient(135deg,var(--bg),transparent);margin-bottom:10px;box-shadow:0 1px 3px rgba(0,0,0,.06)}
-.kpi .l{font-size:.72rem;letter-spacing:.07em;text-transform:uppercase;opacity:.75;font-weight:600}
-.kpi .v{font-size:1.55rem;font-weight:700;color:var(--c);line-height:1.3}
-.kpi .s{font-size:.78rem;opacity:.7;min-height:1.1em}
-</style>""", unsafe_allow_html=True)
-
-BLUE, GREEN, RED, AMBER, PURPLE, TEAL, SLATE = "#3b82f6", "#16a34a", "#dc2626", "#f59e0b", "#8b5cf6", "#0d9488", "#64748b"
-
-
-def wide(fn, *args, **kwargs):
-    """Full-width widget on both old and new Streamlit (use_container_width is being removed)."""
-    try:
-        return fn(*args, width="stretch", **kwargs)
-    except TypeError:
-        return fn(*args, use_container_width=True, **kwargs)
-
-
-def kpi(label, value, sub="", color=BLUE):
-    return (f'<div class="kpi" style="--c:{color};--bg:{color}22"><div class="l">{label}</div>'
-            f'<div class="v">{value}</div><div class="s">{sub}</div></div>')
+GREEN, RED, AMBER, SLATE = "#16a34a", "#dc2626", "#f59e0b", "#64748b"
+MODE_SINGLE, MODE_CHAIN = "Single instrument", "Option chain"
+MODE_CHAIN_HELP = ("Option chain: the underlying's close picks the strike on every bar; the strategy runs on that "
+                   "option's premium (long entries only, i.e. buying CE / PE). The range is clipped to the expiry date.")
 
 
 def sign_color(v):
@@ -86,6 +26,11 @@ def sign_color(v):
 
 def inr(v):
     return f"{'-' if v < 0 else ''}₹{abs(v):,.2f}"
+
+
+def delta_for(v, text):
+    """Metric delta that is gray at exactly zero (numeric 0) and green/red by sign otherwise."""
+    return 0 if v == 0 else text
 
 
 def pnl_style(v):
@@ -100,23 +45,24 @@ def pick_instrument():
 
     exchange = st.selectbox("Exchange / segment", symbols.EXCHANGES, index=2)
     if exchange in symbols.DERIVATIVE_EXCHANGES:
-        c1, c2, c3 = st.columns(3)
-        kind = c1.radio("Instrument", ["OPT", "FUT"], format_func=lambda k: "Option" if k == "OPT" else "Future", horizontal=True)
+        kind = st.segmented_control("Instrument", ["OPT", "FUT"], default="OPT", required=True, key="kind",
+                                    format_func=lambda k: "Option" if k == "OPT" else "Future") or "OPT"
         pool = symbols.contracts(master, exchange, kind)
         names = sorted(pool["underlying"].dropna().unique())
         if not names:
             st.warning("No contracts found for this selection.")
             return "", 1
-        underlying = c2.selectbox("Underlying", names, index=names.index("NIFTY") if "NIFTY" in names else 0)
+        c1, c2 = st.columns(2)
+        underlying = c1.selectbox("Underlying", names, index=names.index("NIFTY") if "NIFTY" in names else 0)
         pool = pool[pool["underlying"] == underlying]
         expiries = sorted(pool["expiry"].dropna().unique())
-        expiry = c3.selectbox("Expiry", expiries, format_func=lambda d: pd.Timestamp(d).strftime("%d-%b-%Y"))
+        expiry = c2.selectbox("Expiry", expiries, format_func=lambda d: pd.Timestamp(d).strftime("%d-%b-%Y"))
         pool = pool[pool["expiry"] == expiry]
         if kind == "OPT":
-            c4, c5 = st.columns(2)
-            opt_type = c4.radio("Option type", ["CE", "PE"], horizontal=True)
+            opt_type = st.segmented_control("Option type", ["CE", "PE"], default="CE", required=True,
+                                            key="opt_type") or "CE"
             strikes = sorted(pool.loc[pool["instrumenttype"] == opt_type, "strike"].unique())
-            strike = c5.selectbox("Strike", strikes, index=len(strikes) // 2, format_func=lambda s: f"{s:g}")
+            strike = st.selectbox("Strike", strikes, index=len(strikes) // 2, format_func=lambda s: f"{s:g}")
             pool = pool[(pool["instrumenttype"] == opt_type) & (pool["strike"] == strike)]
         row = pool.iloc[0]
     else:
@@ -137,19 +83,20 @@ def pick_chain():
     if master is None:
         st.error("The symbol master is required for option-chain mode (download failed).")
         return None
-    c1, c2 = st.columns(2)
-    exchange = c1.selectbox("Derivatives segment", ["NFO", "BFO"])
+    exchange = st.segmented_control("Derivatives segment", ["NFO", "BFO"], default="NFO", required=True,
+                                    key="chain_exchange") or "NFO"
     names = sorted(symbols.contracts(master, exchange, "OPT")["underlying"].dropna().unique())
     if not names:
         st.warning("No option contracts found.")
         return None
     default = "NIFTY" if exchange == "NFO" else "SENSEX"
-    underlying = c2.selectbox("Underlying (index / equity)", names, index=names.index(default) if default in names else 0)
+    underlying = st.selectbox("Underlying (index / equity)", names, index=names.index(default) if default in names else 0)
 
-    c3, c4, c5 = st.columns(3)
-    expiry_choice = c3.selectbox("Expiry", optionchain.EXPIRY_CHOICES)
-    strike_choice = c4.selectbox("Strike", optionchain.STRIKE_CHOICES)
-    side = c5.selectbox("Option side", ["Both", "CE", "PE"])
+    c1, c2 = st.columns(2)
+    expiry_choice = c1.selectbox("Expiry", optionchain.EXPIRY_CHOICES)
+    strike_choice = c2.selectbox("Strike", optionchain.STRIKE_CHOICES)
+    side = st.segmented_control("Option side", ["Both", "CE", "PE"], default="Both", required=True,
+                                key="chain_side") or "Both"
 
     spot = optionchain.spot_symbol(master, exchange, underlying)
     override = st.text_input("Override underlying (spot) Fyers symbol (optional)")
@@ -182,75 +129,115 @@ def rule(kind, value):
     return None if kind == "Off" or not value else (kind.lower(), float(value))
 
 
-# --- Main Dashboard Configuration ---
-fyers = get_fyers_client()
-if not fyers:
-    st.warning("⚠️ Please authenticate via the sidebar to connect to Fyers API.")
-else:
-    st.success("Connected to Fyers API Active Session.")
+# --- Sidebar: connection status, run button, configuration ---
+status, who = auth_ui.session_status()
+fyers = get_fyers_client() if status in auth_ui.CONNECTED else None
+connected = fyers is not None
 
-    st.subheader("Instrument & data")
-    mode = st.radio("Mode", ["Single instrument", "Option chain"], horizontal=True)
-    chain_cfg = None
-    if mode == "Option chain":
-        chain_cfg = pick_chain()
-        target_symbol, lot_default = "", (chain_cfg["lot"] if chain_cfg else 1)
-        st.caption("Option chain: the underlying's close picks the strike on every bar; the strategy runs on "
-                   "that option's premium (long entries only, i.e. buying CE / PE). The range is clipped to the expiry date.")
-    else:
-        target_symbol, lot_default = pick_instrument()
-        override = st.text_input("Override with a Fyers symbol (optional, e.g. an expired contract)")
-        if override.strip():
-            target_symbol = override.strip()
+with st.sidebar:
+    with st.container(border=True):
+        auth_ui.render_status(status, who)
+        # Symbol master: downloaded once a day, cached.
+        master_error = None
+        try:
+            master = symbols.load_master(symbols.today_ist())
+            master_note = f"{len(master):,} symbols · {symbols.today_ist()}"
+        except Exception as e:
+            master, master_note, master_error = None, ":red[Symbol download failed]", str(e)
+        with st.container(horizontal=True, vertical_alignment="center"):
+            st.caption(master_note, help=master_error)
+            st.button("Refresh", key="refresh_symbols", icon=":material/refresh:", type="tertiary",
+                      help="Download the symbol master again", on_click=symbols.load_master.clear)
+    run_slot = st.container()  # filled with the Run button once the configuration below has been read
 
-    c1, c2, c3, c4 = st.columns(4)
-    resolution = c1.selectbox("Resolution", RESOLUTIONS, index=RESOLUTIONS.index("5"))
-    initial_capital = c2.number_input("Initial Capital (₹)", value=100000.0, step=10000.0)
-    start_date = c3.date_input("Start Date", value=date.today() - timedelta(days=30))
-    end_date = c4.date_input("End Date", value=date.today())
-    refresh = st.checkbox("Ignore local cache (re-fetch everything from Fyers)", value=False,
-                          help="By default only symbol / date / resolution ranges missing from the local DuckDB cache are requested.")
+auth_ui.open_dialog_if_requested(status)
 
-    st.subheader("Strategy")
-    strategy = STRATEGIES[st.selectbox("Strategy", list(STRATEGIES))]
-    params, cols = {}, st.columns(len(strategy.params))
-    for col, p in zip(cols, strategy.params):
-        key = f"{strategy.name}.{p.key}"
-        if p.kind == "int":
-            params[p.key] = col.number_input(p.label, int(p.min), int(p.max), int(p.default), 1, key=key)
-        elif p.kind == "float":
-            params[p.key] = col.number_input(p.label, float(p.min), float(p.max), float(p.default), 1.0, key=key)
-        else:
-            params[p.key] = col.selectbox(p.label, p.options, index=p.options.index(p.default), key=key)
+if connected:
+    with st.sidebar:
+        with st.expander("Instrument and data", expanded=True, icon=":material/candlestick_chart:"):
+            mode = st.segmented_control("Mode", [MODE_SINGLE, MODE_CHAIN], default=MODE_SINGLE, required=True,
+                                        key="mode", help=MODE_CHAIN_HELP) or MODE_SINGLE
+            chain_cfg = None
+            if mode == MODE_CHAIN:
+                chain_cfg = pick_chain()
+                target_symbol, lot_default = "", (chain_cfg["lot"] if chain_cfg else 1)
+            else:
+                target_symbol, lot_default = pick_instrument()
+                override = st.text_input("Override with a Fyers symbol (optional)",
+                                         help="For example an expired contract.")
+                if override.strip():
+                    target_symbol = override.strip()
 
-    st.subheader("Trade settings")
-    t1, t2, t3, t4 = st.columns(4)
-    if mode == "Option chain":
-        direction = "Long only"
-        t1.selectbox("Direction", ["Long only"], disabled=True)
-    else:
-        direction = t1.selectbox("Direction", ["Long only", "Short only", "Long & Short"])
-    tgt_kind = t2.selectbox("Target", ["Off", "Points", "Percent"], index=1)
-    tgt_val = t2.number_input("Target value", min_value=0.0, value=30.0, step=1.0)
-    sl_kind = t3.selectbox("Stop loss", ["Off", "Points", "Percent"], index=1)
-    sl_val = t3.number_input("Stop loss value", min_value=0.0, value=25.0, step=1.0)
-    sizing = t4.selectbox("Position sizing", ["Lots from capital", "Fixed quantity"])
-    lot_size = t4.number_input("Lot size", min_value=1, value=lot_default, step=1) if sizing == "Lots from capital" else 1
-    fixed_qty = t4.number_input("Quantity", min_value=1, value=max(lot_default, 1), step=1) if sizing == "Fixed quantity" else 1
+            resolution = st.selectbox("Resolution", RESOLUTIONS, index=RESOLUTIONS.index("5"), key="resolution")
+            initial_capital = st.number_input("Initial capital (₹)", value=100000.0, step=10000.0, key="initial_capital")
+            d1, d2 = st.columns(2)
+            start_date = d1.date_input("Start date", value=date.today() - timedelta(days=30), key="start_date")
+            end_date = d2.date_input("End date", value=date.today(), key="end_date")
+            refresh = st.checkbox("Ignore local cache", value=False, key="refresh",
+                                  help="Re-fetch everything from Fyers. By default only symbol / date / resolution "
+                                       "ranges missing from the local DuckDB cache are requested.")
 
-    intraday_res = bar_minutes(resolution) is not None
-    w1, w2, w3, w4, w5 = st.columns(5)
-    square_off = w1.checkbox("Intraday: square off daily", value=True, disabled=not intraday_res)
-    win_start = w2.time_input("Entries from", value=dtime(9, 15), disabled=not (intraday_res and square_off))
-    sq_at = w3.time_input("Square off at", value=dtime(15, 29), disabled=not (intraday_res and square_off))
-    brokerage = w4.number_input("Brokerage per order (₹)", min_value=0.0, value=20.0, step=1.0)
-    govt_pct = w5.number_input("Govt charges on sell (%)", min_value=0.0, value=0.05, step=0.01, format="%.3f")
+        with st.expander("Strategy", icon=":material/insights:"):
+            strategy = STRATEGIES[st.selectbox("Strategy", list(STRATEGIES), key="strategy")]
+            params = {}
+            param_cols = st.columns(2)
+            for i, p in enumerate(strategy.params):
+                col, key = param_cols[i % 2], f"{strategy.name}.{p.key}"
+                if p.kind == "int":
+                    params[p.key] = col.number_input(p.label, int(p.min), int(p.max), int(p.default), 1, key=key)
+                elif p.kind == "float":
+                    params[p.key] = col.number_input(p.label, float(p.min), float(p.max), float(p.default), 1.0, key=key)
+                else:
+                    params[p.key] = col.selectbox(p.label, p.options, index=p.options.index(p.default), key=key)
 
-    if st.button("📥 Fetch Historical Data & Run Backtest"):
+        with st.expander("Risk and sizing", icon=":material/shield:"):
+            if mode == MODE_CHAIN:
+                direction = "long"
+                st.caption("Direction: long only (buying CE / PE).")
+            else:
+                direction = {"Long": "long", "Short": "short", "Both": "both"}[
+                    st.segmented_control("Direction", ["Long", "Short", "Both"], default="Long", required=True,
+                                         key="direction") or "Long"]
+            tgt_kind = st.segmented_control("Target", ["Off", "Points", "Percent"], default="Points", required=True,
+                                            key="tgt_kind") or "Points"
+            sl_kind = st.segmented_control("Stop loss", ["Off", "Points", "Percent"], default="Points", required=True,
+                                           key="sl_kind") or "Points"
+            r1, r2 = st.columns(2)
+            tgt_val = r1.number_input("Target value", min_value=0.0, value=30.0, step=1.0, disabled=tgt_kind == "Off",
+                                      key="tgt_val")
+            sl_val = r2.number_input("Stop loss value", min_value=0.0, value=25.0, step=1.0, disabled=sl_kind == "Off",
+                                     key="sl_val")
+            sizing = {"From capital": "capital", "Fixed qty": "fixed"}[
+                st.segmented_control("Position sizing", ["From capital", "Fixed qty"], default="From capital",
+                                     required=True, key="sizing") or "From capital"]
+            # No key: the default follows the selected instrument's lot size.
+            lot_size = st.number_input("Lot size", min_value=1, value=lot_default, step=1) if sizing == "capital" else 1
+            fixed_qty = st.number_input("Quantity", min_value=1, value=max(lot_default, 1), step=1) if sizing == "fixed" else 1
+
+        with st.expander("Costs and session", icon=":material/payments:"):
+            intraday_res = bar_minutes(resolution) is not None
+            square_off = st.checkbox("Intraday: square off daily", value=True, disabled=not intraday_res,
+                                     key="square_off")
+            w1, w2 = st.columns(2)
+            win_start = w1.time_input("Entries from", value=dtime(9, 15), disabled=not (intraday_res and square_off),
+                                      key="win_start")
+            sq_at = w2.time_input("Square off at", value=dtime(15, 29), disabled=not (intraday_res and square_off),
+                                  key="sq_at")
+            b1, b2 = st.columns(2)
+            brokerage = b1.number_input("Brokerage per order (₹)", min_value=0.0, value=20.0, step=1.0, key="brokerage")
+            govt_pct = b2.number_input("Govt charges on sell (%)", min_value=0.0, value=0.05, step=0.01, format="%.3f",
+                                       key="govt_pct")
+
+        run_disabled = chain_cfg is None if mode == MODE_CHAIN else not target_symbol
+        run_clicked = run_slot.button("Run backtest", key="run_backtest", type="primary", width="stretch",
+                                      icon=":material/play_arrow:", disabled=run_disabled,
+                                      help="Fetch any missing candles from Fyers, then run the simulation.")
+
+    if run_clicked:
         cfg = ExecConfig(
-            direction={"Long only": "long", "Short only": "short", "Long & Short": "both"}[direction],
+            direction=direction,
             target=rule(tgt_kind, tgt_val), stop=rule(sl_kind, sl_val),
-            sizing="capital" if sizing == "Lots from capital" else "fixed",
+            sizing=sizing,
             lot_size=int(lot_size), fixed_qty=int(fixed_qty),
             bar_minutes=bar_minutes(resolution), square_off=square_off,
             window_start=win_start, square_off_at=sq_at, brokerage=brokerage, govt_pct=govt_pct,
@@ -258,7 +245,7 @@ else:
         engine = BacktestEngine(initial_capital)
         st.session_state.pop("bt", None)
 
-        if mode == "Option chain":
+        if mode == MODE_CHAIN:
             if chain_cfg:
                 prog = st.progress(0.0, text="Starting...")
                 try:
@@ -298,72 +285,84 @@ else:
                         label=target_symbol, n=len(df_hist), summary=res.summary, trades=res.trades,
                         info=None, data=stats, candles=res.candles, default_symbol=res.default_symbol)
 
-    bt = st.session_state.get("bt")
-    if bt:
-        summary, trades_df = bt["summary"], bt["trades"]
-        d = bt.get("data") or {}
-        st.success(f"{bt['label']}: {bt['n']} underlying candles. Data: {d.get('api_calls', 0)} Fyers API call(s) · "
-                   f"{d.get('from_cache', 0)} symbol(s) served fully from the local cache · "
-                   f"{d.get('fetched', 0)} fetched / topped up.")
+# --- Main area: empty states, then results ---
+bt = st.session_state.get("bt")
+if not bt and not connected:
+    st.warning("Connect to Fyers to configure and run a backtest.", title="Not connected", icon=":material/lock:")
+    st.button("Connect to Fyers", key="auth_open_main", type="primary", icon=":material/key:",
+              on_click=auth_ui.request_dialog)
+elif not bt:
+    st.info("Choose the instrument, strategy and trade settings in the sidebar, then select **Run backtest**.",
+            title="Ready to backtest", icon=":material/tune:")
 
-        st.subheader("📊 Performance Summary")
-        net, gross, charges = summary["Net Profit / Loss"], summary["Gross Profit / Loss"], summary["Total Charges"]
-        ret = net / summary["Initial Capital"] * 100
-        r1 = st.columns(5)
-        r1[0].markdown(kpi("Initial Capital", inr(summary["Initial Capital"]), "Starting balance", BLUE), unsafe_allow_html=True)
-        r1[1].markdown(kpi("Gross Profit / Loss", inr(gross), "Before charges", sign_color(gross)), unsafe_allow_html=True)
-        r1[2].markdown(kpi("Charges", inr(charges),
-                           f"Brokerage {inr(summary['Brokerage'])} · Govt {inr(summary['Govt Charges'])}", AMBER),
-                       unsafe_allow_html=True)
-        r1[3].markdown(kpi("Net Profit / Loss", inr(net), f"{ret:+.2f}% on capital", sign_color(net)), unsafe_allow_html=True)
-        r1[4].markdown(kpi("Final Capital", inr(summary["Final Capital"]), "After charges", sign_color(net)), unsafe_allow_html=True)
-        pf = summary["Profit Factor"]
-        wr = summary["Win Rate (%)"]
-        r2 = st.columns(5)
-        r2[0].markdown(kpi("Total Trades", summary["Total Trades"], "Round trips", SLATE), unsafe_allow_html=True)
-        r2[1].markdown(kpi("Win Rate", f"{wr:.2f}%", "Net of charges", GREEN if wr >= 50 else AMBER), unsafe_allow_html=True)
-        r2[2].markdown(kpi("Profit Factor", "∞" if pf == float("inf") else f"{pf:.2f}", "Net wins / net losses",
-                           GREEN if pf >= 1.5 else AMBER if pf >= 1 else RED), unsafe_allow_html=True)
-        r2[3].markdown(kpi("Max Drawdown", f"{summary['Max Drawdown (%)']:.2f}%", "Peak to trough", RED), unsafe_allow_html=True)
-        avg = net / summary["Total Trades"] if summary["Total Trades"] else 0.0
-        r2[4].markdown(kpi("Avg Net / Trade", inr(avg), "Per round trip", sign_color(avg)), unsafe_allow_html=True)
-        if summary["Skipped (insufficient capital)"]:
-            st.warning(f"{summary['Skipped (insufficient capital)']} signal(s) skipped: capital below one lot.")
+if bt:
+    summary, trades_df = bt["summary"], bt["trades"]
+    d = bt.get("data") or {}
+    st.success(f"{bt['label']}: {bt['n']} underlying candles. Data: {d.get('api_calls', 0)} Fyers API call(s) · "
+               f"{d.get('from_cache', 0)} symbol(s) served fully from the local cache · "
+               f"{d.get('fetched', 0)} fetched / topped up.")
 
-        if bt["info"]:
-            info = bt["info"]
-            with st.expander("🔗 Option chain details (strikes & contracts fetched)"):
-                st.write(f"**Spot:** {info['Spot symbol']} · **Expiry:** {info['Expiry']} · **Strike rule:** {info['Strike rule']}")
-                for side, ks in info["Strikes fetched"].items():
-                    st.write(f"**{side} strikes selected by the LTP movement ({len(ks)}):** " + ", ".join(f"{k:g}" for k in ks))
-                wide(st.dataframe, pd.DataFrame({"Contract": list(info["Contracts"]), "Candles": list(info["Contracts"].values())}),
-                     hide_index=True)
-                for issue in info["Issues"]:
-                    st.warning(issue)
+    st.subheader("Performance summary")
+    capital = summary["Initial Capital"]
+    net, gross, charges = summary["Net Profit / Loss"], summary["Gross Profit / Loss"], summary["Total Charges"]
+    pf, wr = summary["Profit Factor"], summary["Win Rate (%)"]
+    avg = net / summary["Total Trades"] if summary["Total Trades"] else 0.0
+    with st.grid(5):
+        st.metric("Initial capital", inr(capital), border=True, height="stretch", help="Starting balance")
+        st.metric("Gross P/L", inr(gross), delta_for(gross, f"{gross / capital * 100:+.2f}%"),
+                  delta_description="before charges", border=True, height="stretch")
+        st.metric("Charges", inr(charges), border=True, height="stretch",
+                  help=f"Brokerage {inr(summary['Brokerage'])} · Govt charges {inr(summary['Govt Charges'])}")
+        st.metric("Net P/L", inr(net), delta_for(net, f"{net / capital * 100:+.2f}%"),
+                  delta_description="on capital", border=True, height="stretch")
+        st.metric("Final capital", inr(summary["Final Capital"]), delta_for(net, inr(net)),
+                  delta_description="after charges", border=True, height="stretch")
+    with st.grid(5):
+        st.metric("Total trades", summary["Total Trades"], border=True, height="stretch", help="Round trips")
+        st.metric("Win rate", f"{wr:.2f}%", border=True, height="stretch", help="Net of charges")
+        st.metric("Profit factor", "∞" if pf == float("inf") else f"{pf:.2f}", border=True, height="stretch",
+                  help="Net wins / net losses")
+        st.metric("Max drawdown", f"{summary['Max Drawdown (%)']:.2f}%", border=True, height="stretch",
+                  help="Peak to trough")
+        st.metric("Avg net / trade", inr(avg), border=True, height="stretch", help="Per round trip")
+    if summary["Skipped (insufficient capital)"]:
+        st.warning(f"{summary['Skipped (insufficient capital)']} signal(s) skipped: capital below one lot.")
 
-        st.subheader("📈 Equity Curve")
-        if not trades_df.empty:
-            fig = px.line(trades_df, x="Exit Time", y="Cumulative Capital", title="Strategy Equity Curve (net of charges)",
-                          markers=True, hover_data=["Symbol", "Net PnL", "Exit Reason"])
-            fig.update_traces(line_color=sign_color(net), marker_color=sign_color(net))
-            wide(st.plotly_chart, fig)
-        else:
-            st.info("No completed trades generated during this period with current parameters.")
+    if bt["info"]:
+        info = bt["info"]
+        with st.expander("Option chain details (strikes and contracts fetched)", icon=":material/link:"):
+            st.write(f"**Spot:** {info['Spot symbol']} · **Expiry:** {info['Expiry']} · **Strike rule:** {info['Strike rule']}")
+            for side, ks in info["Strikes fetched"].items():
+                st.write(f"**{side} strikes selected by the LTP movement ({len(ks)}):** " + ", ".join(f"{k:g}" for k in ks))
+            st.dataframe(pd.DataFrame({"Contract": list(info["Contracts"]), "Candles": list(info["Contracts"].values())}),
+                         hide_index=True, alt="Contracts fetched and their candle counts")
+            for issue in info["Issues"]:
+                st.warning(issue)
 
-        st.subheader("📋 Executed Trades Detail Ledger")
-        if not trades_df.empty:
-            money = ["Entry Price", "Exit Price", "Gross PnL", "Brokerage", "Govt Charges", "Total Charges", "Net PnL",
-                     "Cumulative Capital"]
-            styler = trades_df.style.format({**{c: "{:,.2f}" for c in money}, "Return (%)": "{:+.2f}%"})
-            paint = getattr(styler, "map", None) or styler.applymap
-            styler = paint(pnl_style, subset=["Gross PnL", "Net PnL", "Return (%)"])
-            styler = (getattr(styler, "map", None) or styler.applymap)(lambda v: f"color: {AMBER}", subset=["Brokerage", "Govt Charges", "Total Charges"])
-            wide(st.dataframe, styler)
-        else:
-            wide(st.dataframe, trades_df)
-        st.download_button(
-            label="Download Trades Report as CSV",
-            data=trades_df.to_csv(index=False).encode("utf-8"),
-            file_name=f"backtest_trades_{bt['label'].replace(':', '_').replace(' ', '_')}.csv",
-            mime="text/csv",
-        )
+    st.subheader("Equity curve")
+    if not trades_df.empty:
+        fig = px.line(trades_df, x="Exit Time", y="Cumulative Capital", title="Strategy equity curve (net of charges)",
+                      markers=True, hover_data=["Symbol", "Net PnL", "Exit Reason"])
+        fig.update_traces(line_color=sign_color(net), marker_color=sign_color(net))
+        st.plotly_chart(fig, width="stretch")
+    else:
+        st.info("No completed trades generated during this period with current parameters.")
+
+    st.subheader("Executed trades")
+    if not trades_df.empty:
+        money = ["Entry Price", "Exit Price", "Gross PnL", "Brokerage", "Govt Charges", "Total Charges", "Net PnL",
+                 "Cumulative Capital"]
+        styler = trades_df.style.format({**{c: "{:,.2f}" for c in money}, "Return (%)": "{:+.2f}%"})
+        paint = getattr(styler, "map", None) or styler.applymap
+        styler = paint(pnl_style, subset=["Gross PnL", "Net PnL", "Return (%)"])
+        styler = (getattr(styler, "map", None) or styler.applymap)(lambda v: f"color: {AMBER}", subset=["Brokerage", "Govt Charges", "Total Charges"])
+        st.dataframe(styler, alt="Ledger of executed trades")
+    else:
+        st.dataframe(trades_df, alt="Ledger of executed trades (empty)")
+    st.download_button(
+        label="Download trades report as CSV",
+        data=trades_df.to_csv(index=False).encode("utf-8"),
+        file_name=f"backtest_trades_{bt['label'].replace(':', '_').replace(' ', '_')}.csv",
+        mime="text/csv",
+        icon=":material/download:",
+    )
