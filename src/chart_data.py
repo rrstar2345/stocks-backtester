@@ -7,6 +7,39 @@ import numpy as np
 import pandas as pd
 
 
+def _strike_text(strike: float) -> str:
+    return str(int(strike)) if float(strike) == int(strike) else str(strike)
+
+
+def contract_parts(symbol: str, strikes: dict | None) -> tuple[float, str] | None:
+    """(strike, 'CE'|'PE') of an option ticker, found by matching the ticker's end against the strikes the
+    run fetched (`{"CE": [24900.0, ...], "PE": [...]}`). Weekly tickers have the expiry day and the strike
+    run together (NSE:NIFTY26N1724000CE), so the strike cannot be read from the text alone; the longest
+    matching strike wins."""
+    for side in ("CE", "PE"):
+        if symbol.endswith(side):
+            hits = [k for k in (strikes or {}).get(side, []) if symbol.endswith(_strike_text(k) + side)]
+            if hits:
+                return max(hits, key=lambda k: len(_strike_text(k))), side
+    return None
+
+
+def symbol_options(symbols, default_symbol: str, strikes: dict | None = None) -> list[str]:
+    """Dropdown order: the default instrument first, then CE contracts by strike, then PE contracts
+    by strike, then anything that is not a recognised option contract."""
+    rest = [s for s in symbols if s != default_symbol]
+    parts = {s: contract_parts(s, strikes) for s in rest}
+    contracts = sorted((s for s in rest if parts[s]), key=lambda s: (parts[s][1] != "CE", parts[s][0], s))
+    other = sorted(s for s in rest if not parts[s])
+    return [default_symbol, *contracts, *other]
+
+
+def symbol_label(symbol: str, default_symbol: str, strikes: dict | None = None) -> str:
+    """`24900 CE` for contracts; the underlying (or single instrument) keeps its Fyers symbol."""
+    parts = contract_parts(symbol, strikes) if symbol != default_symbol else None
+    return f"{parts[0]:g} {parts[1]}" if parts else symbol
+
+
 def bar_labels(timestamps, daily: bool) -> list[str]:
     fmt = "%Y-%m-%d" if daily else "%Y-%m-%d %H:%M"
     return pd.DatetimeIndex(timestamps).strftime(fmt).tolist()
@@ -61,10 +94,16 @@ def build_payload(candles: pd.DataFrame, trades: pd.DataFrame, symbol: str, defa
     daily = str(resolution).upper() in ("D", "1D")
     shown = trades if symbol == default_symbol else trades[trades["Symbol"] == symbol]
     markers, tips = ([], []) if df.empty or shown.empty else trade_markers(shown, df["timestamp"].to_numpy())
-    return {
+    payload = {
         "symbol": symbol,
         "t": bar_labels(df["timestamp"], daily),
         "o": df["open"].round(4).tolist(), "h": df["high"].round(4).tolist(),
         "l": df["low"].round(4).tolist(), "c": df["close"].round(4).tolist(),
         "markers": markers, "tips": tips,
     }
+    # RSI pane: only when the strategy produced it. NaN (no value yet) becomes null.
+    if "rsi" in df.columns:
+        for key, col in (("rsi", "rsi"), ("rsi_ma", "rsi_ma")):
+            if col in df.columns:
+                payload[key] = [None if pd.isna(v) else round(float(v), 2) for v in df[col]]
+    return payload

@@ -9,7 +9,8 @@ from pathlib import Path
 import streamlit as st
 
 ASSETS = Path(__file__).resolve().parent.parent / "assets"
-CHART_HEIGHT = 520
+CHART_HEIGHT = 520      # price only
+CHART_HEIGHT_RSI = 680  # price pane above an RSI pane
 
 _HTML = """
 <div id="wrap">
@@ -55,5 +56,7 @@ _PRICE_CHART = st.components.v2.component("stocks_price_chart", html=_HTML, css=
 
 def price_chart(payload: dict, *, chart_id: str, key: str):
     """Candlestick chart with trade markers. `chart_id` changes when the data does (a new run or a
-    different symbol); the chart keeps its zoom across reruns while the id stays the same."""
-    return _PRICE_CHART(data={**payload, "id": chart_id}, key=key, height=CHART_HEIGHT)
+    different symbol); the chart keeps its zoom across reruns while the id stays the same. An RSI
+    pane is added under the candles when the payload carries `rsi`."""
+    height = CHART_HEIGHT_RSI if payload.get("rsi") else CHART_HEIGHT
+    return _PRICE_CHART(data={**payload, "id": chart_id, "height": height}, key=key, height=height)

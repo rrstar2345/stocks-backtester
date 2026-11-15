@@ -1,6 +1,6 @@
 // Price chart component body. src/chart_component.py prepends the vendored Lightweight Charts
 // module and an `LWC` object holding its public exports.
-const { createChart, CandlestickSeries, createSeriesMarkers, CrosshairMode, ColorType } = LWC
+const { createChart, CandlestickSeries, LineSeries, LineStyle, createSeriesMarkers, CrosshairMode, ColorType } = LWC
 //
 // Time axis: each bar's time is its index (times 60 s, as the library wants UTC seconds), so
 // overnight and holiday gaps are not drawn. `data.t` holds a label per bar for ticks and the crosshair.
@@ -22,6 +22,8 @@ function readTheme(host) {
     down: token(host, "--st-red-color", "#dc2626"),
     flat: token(host, "--st-yellow-color", "#f59e0b"),
     entry: token(host, "--st-blue-color", "#2563eb"),
+    rsi: token(host, "--st-violet-color", "#7c3aed"),
+    rsiMa: token(host, "--st-orange-color", "#ea580c"),
     font: token(host, "--st-font", "sans-serif"),
   }
 }
@@ -47,6 +49,40 @@ function markerList(data, theme) {
   }))
 }
 
+// One value per bar; null (indicator not warm yet) becomes whitespace so both panes keep the same bar index.
+function lineData(values) {
+  return values.map((v, i) => (v === null ? { time: i * STEP } : { time: i * STEP, value: v }))
+}
+
+// RSI in its own pane: fixed 0-100 scale, dashed guides at 30 / 50 / 70, the smoothing average dotted.
+function addRsiPane(chart, data, theme) {
+  const rsi = chart.addSeries(LineSeries, {
+    color: theme.rsi, lineWidth: 2, title: "RSI", priceLineVisible: false,
+    priceFormat: { type: "price", precision: 1, minMove: 0.1 },
+    autoscaleInfoProvider: () => ({ priceRange: { minValue: 0, maxValue: 100 } }),
+  }, 1)
+  rsi.setData(lineData(data.rsi))
+  let rsiMa = null
+  if (data.rsi_ma) {
+    rsiMa = chart.addSeries(LineSeries, {
+      color: theme.rsiMa, lineWidth: 2, lineStyle: LineStyle.Dotted, title: "MA",
+      priceLineVisible: false, lastValueVisible: false,
+      autoscaleInfoProvider: () => ({ priceRange: { minValue: 0, maxValue: 100 } }),
+    }, 1)
+    rsiMa.setData(lineData(data.rsi_ma))
+  }
+  const guides = [30, 50, 70].map((price) => rsi.createPriceLine({
+    price, color: theme.border, lineWidth: 1, lineStyle: price === 50 ? LineStyle.Dotted : LineStyle.Dashed,
+    axisLabelVisible: true, title: "",
+  }))
+  // Default margins would stretch the axis past 100; keep it tight so the scale reads 0-100.
+  chart.priceScale("right", 1).applyOptions({ scaleMargins: { top: 0.06, bottom: 0.06 } })
+  const panes = chart.panes()
+  panes[0].setStretchFactor(5)
+  panes[1].setStretchFactor(2)
+  return { rsi, rsiMa, guides }
+}
+
 function build(root, tip, data, theme) {
   const labels = data.t
   const chart = createChart(root, {
@@ -69,6 +105,7 @@ function build(root, tip, data, theme) {
     time: i * STEP, open: data.o[i], high: data.h[i], low: data.l[i], close: data.c[i],
   })))
   const markers = createSeriesMarkers(series, markerList(data, theme))
+  const pane = data.rsi ? addRsiPane(chart, data, theme) : null
 
   // Tooltip for the trades marked on the hovered bar.
   const byBar = new Map()
@@ -104,7 +141,7 @@ function build(root, tip, data, theme) {
   })
 
   chart.timeScale().fitContent()
-  return { chart, series, markers }
+  return { chart, series, markers, pane }
 }
 
 export default function (component) {
@@ -113,6 +150,9 @@ export default function (component) {
   const root = parentElement.querySelector("#chart")
   const tip = parentElement.querySelector("#tip")
   if (!root || !tip || !data) return
+
+  const wrap = parentElement.querySelector("#wrap")
+  if (wrap && data.height) wrap.style.height = `${data.height}px`
 
   const theme = readTheme(host)
   let state = STATE.get(parentElement)
@@ -135,6 +175,11 @@ export default function (component) {
       upColor: theme.up, downColor: theme.down, wickUpColor: theme.up, wickDownColor: theme.down,
     })
     state.markers.setMarkers(markerList(data, theme))
+    if (state.pane) {
+      state.pane.rsi.applyOptions({ color: theme.rsi })
+      state.pane.rsiMa?.applyOptions({ color: theme.rsiMa })
+      state.pane.guides.forEach((g) => g.applyOptions({ color: theme.border }))
+    }
   }
 
   return () => {

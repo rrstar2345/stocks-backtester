@@ -8,7 +8,7 @@ from src import auth_ui, optionchain, symbols
 from src.auth import get_fyers_client
 from src.backtester import BacktestEngine, ExecConfig, RESOLUTIONS, bar_minutes, warmup_days
 from src.chart_component import price_chart
-from src.chart_data import build_payload
+from src.chart_data import build_payload, symbol_label, symbol_options
 from src.database import fetch_history_fyers, fetch_candles_from_db
 from src.equity import GREEN, RED, AMBER, equity_curve, gradient_color
 from src.strategies import STRATEGIES
@@ -72,6 +72,27 @@ def equity_option(curve, capital, final):
 def chart_payload(run_id, symbol, _candles, _trades, default_symbol, start, resolution):
     """Price chart payload, built once per run and symbol (the underscored frames are not hashed)."""
     return build_payload(_candles[symbol], _trades, symbol, default_symbol, start, resolution)
+
+
+@st.fragment
+def price_section():
+    """Symbol dropdown, candles, trade markers and RSI. A fragment, so changing the symbol reruns only
+    this section and never the backtest; everything it shows comes from `session_state["bt"]`."""
+    bt = st.session_state["bt"]
+    trades_df, default_symbol = bt["trades"], bt["default_symbol"]
+    strikes = (bt["info"] or {}).get("Strikes fetched")  # chain mode: lets the dropdown read each contract's strike
+    options = symbol_options(bt["candles"], default_symbol, strikes)
+    # Key per run: a new backtest starts again on the default symbol.
+    symbol = st.selectbox("Symbol", options, key=f"chart_symbol:{bt['id']}", disabled=len(options) == 1,
+                          format_func=lambda s: symbol_label(s, default_symbol, strikes),
+                          help="The underlying, then the option contracts fetched during the run. "
+                               "Markers show the trades of the selected contract." if len(options) > 1 else None)
+    on_default = symbol == default_symbol
+    st.caption(f"{symbol} · {resolution_label(bt['resolution'])} candles"
+               + (" · markers show every trade, including those on option contracts"
+                  if on_default and bt["info"] else ""))
+    payload = chart_payload(bt["id"], symbol, bt["candles"], trades_df, default_symbol, bt["start"], bt["resolution"])
+    price_chart(payload, chart_id=f"{bt['id']}:{symbol}", key="price_chart")
 
 
 def pick_instrument():
@@ -389,12 +410,7 @@ if bt:
         st.info("No completed trades generated during this period with current parameters.")
 
     st.subheader("Price chart")
-    default_symbol = bt["default_symbol"]
-    st.caption(f"{default_symbol} · {resolution_label(bt['resolution'])} candles"
-               + (" · markers show every trade, including those on option contracts" if bt["info"] else ""))
-    payload = chart_payload(bt["id"], default_symbol, bt["candles"], trades_df, default_symbol, bt["start"],
-                            bt["resolution"])
-    price_chart(payload, chart_id=f"{bt['id']}:{default_symbol}", key="price_chart")
+    price_section()
 
     st.subheader("Executed trades")
     if not trades_df.empty:
