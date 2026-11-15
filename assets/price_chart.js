@@ -41,12 +41,43 @@ function tickLabel(labels, time, type) {
   return clock
 }
 
+// Index into data.tips of the focused trade (focus.n is the trade number), or -1 when this chart does not show it.
+function focusedTip(data) {
+  return data.focus ? data.tips.findIndex((t) => t.n === data.focus.n) : -1
+}
+
 function markerList(data, theme) {
   const color = { entry: theme.entry, pos: theme.up, neg: theme.down, flat: theme.flat }
+  const focused = focusedTip(data)
   return data.markers.map((m) => ({
     time: m.i * STEP, position: m.pos, shape: m.shape, color: color[m.tone] ?? theme.text,
-    text: m.text, size: 1,
+    text: m.text, size: m.trade === focused ? 2 : 1,
   }))
+}
+
+// Zoom to the focused trade: 60 bars either side of its entry, widened to keep the exit in view.
+// Bar index equals logical index because every bar has exactly one candle.
+const CONTEXT_BARS = 60
+
+function focusTrade(state, data, host) {
+  const k = focusedTip(data)
+  if (k < 0) return
+  const bars = data.markers.filter((m) => m.trade === k).map((m) => m.i)
+  const entry = Math.min(...bars), exit = Math.max(...bars)
+  state.chart.timeScale().setVisibleLogicalRange({
+    from: entry - CONTEXT_BARS, to: Math.max(entry + CONTEXT_BARS, exit + 20),
+  })
+  // The ledger sits below the chart, so bring the chart back into view after a row click.
+  host.style.scrollMarginTop = "4rem"
+  host.scrollIntoView({ behavior: "smooth", block: "start" })
+}
+
+// Apply a focus request once: `seq` changes with every ledger click, a plain rerun keeps the user's zoom.
+function applyFocus(state, data, host) {
+  const seq = data.focus ? data.focus.seq : null
+  if (seq === state.focusSeq) return
+  state.focusSeq = seq
+  if (data.focus) focusTrade(state, data, host)
 }
 
 // One value per bar; null (indicator not warm yet) becomes whitespace so both panes keep the same bar index.
@@ -161,8 +192,9 @@ export default function (component) {
     state = null
   }
   if (!state) {
-    state = { id: data.id, ...build(root, tip, data, theme) }
+    state = { id: data.id, focusSeq: null, ...build(root, tip, data, theme) }
     STATE.set(parentElement, state)
+    applyFocus(state, data, host)
   } else {
     // Same data, new theme (or just a rerun): recolor without resetting the zoom.
     state.chart.applyOptions({
@@ -180,6 +212,7 @@ export default function (component) {
       state.pane.rsiMa?.applyOptions({ color: theme.rsiMa })
       state.pane.guides.forEach((g) => g.applyOptions({ color: theme.border }))
     }
+    applyFocus(state, data, host)
   }
 
   return () => {

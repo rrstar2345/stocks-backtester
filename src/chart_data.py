@@ -40,6 +40,16 @@ def symbol_label(symbol: str, default_symbol: str, strikes: dict | None = None) 
     return f"{parts[0]:g} {parts[1]}" if parts else symbol
 
 
+def trade_focus(trades: pd.DataFrame, row: int, symbols, default_symbol: str) -> tuple[str, int] | None:
+    """(symbol to chart, trade number) for the ledger row `row` (a position in `trades`). The symbol is the
+    trade's own contract; if that has no candles in this run, the default instrument is charted instead."""
+    if not 0 <= row < len(trades):
+        return None
+    r = trades.iloc[row]
+    symbol = str(r["Symbol"])
+    return (symbol if symbol in symbols else default_symbol), int(r["Trade #"])
+
+
 def bar_labels(timestamps, daily: bool) -> list[str]:
     fmt = "%Y-%m-%d" if daily else "%Y-%m-%d %H:%M"
     return pd.DatetimeIndex(timestamps).strftime(fmt).tolist()

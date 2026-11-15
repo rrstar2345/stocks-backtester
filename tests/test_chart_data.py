@@ -2,7 +2,7 @@
 import numpy as np
 import pandas as pd
 
-from src.chart_data import build_payload, symbol_label, symbol_options
+from src.chart_data import build_payload, symbol_label, symbol_options, trade_focus
 
 SPOT = "NSE:NIFTY50-INDEX"
 # Weekly tickers run the expiry day and the strike together: NIFTY 26 + 11 (Nov) + 13 (day) + 24900.
@@ -59,3 +59,20 @@ def test_payload_rsi_is_clipped_to_start_date_with_candles():
     payload = build_payload(df, pd.DataFrame(), SPOT, SPOT, df["timestamp"].iloc[2], "5")
     assert len(payload["t"]) == len(payload["rsi"]) == 4
     assert payload["rsi"][0] == 40.12
+
+
+def _ledger():
+    return pd.DataFrame({"Trade #": [1, 2], "Symbol": [CE_LOW, "NSE:GONE24900CE"]})
+
+
+def test_trade_focus_uses_the_trades_contract():
+    assert trade_focus(_ledger(), 0, [SPOT, CE_LOW], SPOT) == (CE_LOW, 1)
+
+
+def test_trade_focus_falls_back_to_default_symbol_without_candles():
+    assert trade_focus(_ledger(), 1, [SPOT, CE_LOW], SPOT) == (SPOT, 2)
+
+
+def test_trade_focus_ignores_rows_out_of_range():
+    assert trade_focus(_ledger(), 2, [SPOT], SPOT) is None
+    assert trade_focus(_ledger(), -1, [SPOT], SPOT) is None

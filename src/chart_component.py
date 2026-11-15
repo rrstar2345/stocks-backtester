@@ -54,9 +54,12 @@ def _script() -> str:
 _PRICE_CHART = st.components.v2.component("stocks_price_chart", html=_HTML, css=_CSS, js=_script())
 
 
-def price_chart(payload: dict, *, chart_id: str, key: str):
+def price_chart(payload: dict, *, chart_id: str, key: str, focus: dict | None = None):
     """Candlestick chart with trade markers. `chart_id` changes when the data does (a new run or a
     different symbol); the chart keeps its zoom across reruns while the id stays the same. An RSI
-    pane is added under the candles when the payload carries `rsi`."""
+    pane is added under the candles when the payload carries `rsi`.
+
+    `focus` is `{"n": trade number, "seq": counter}`: the chart zooms to that trade, enlarges its
+    markers and scrolls into view once per `seq`, so reruns do not undo the user's own zooming."""
     height = CHART_HEIGHT_RSI if payload.get("rsi") else CHART_HEIGHT
-    return _PRICE_CHART(data={**payload, "id": chart_id, "height": height}, key=key, height=height)
+    return _PRICE_CHART(data={**payload, "id": chart_id, "height": height, "focus": focus}, key=key, height=height)

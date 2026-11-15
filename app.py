@@ -8,7 +8,7 @@ from src import auth_ui, optionchain, symbols
 from src.auth import get_fyers_client
 from src.backtester import BacktestEngine, ExecConfig, RESOLUTIONS, bar_minutes, warmup_days
 from src.chart_component import price_chart
-from src.chart_data import build_payload, symbol_label, symbol_options
+from src.chart_data import build_payload, symbol_label, symbol_options, trade_focus
 from src.database import fetch_history_fyers, fetch_candles_from_db
 from src.equity import GREEN, RED, AMBER, equity_curve, gradient_color
 from src.strategies import STRATEGIES
@@ -74,10 +74,30 @@ def chart_payload(run_id, symbol, _candles, _trades, default_symbol, start, reso
     return build_payload(_candles[symbol], _trades, symbol, default_symbol, start, resolution)
 
 
-@st.fragment
+def clear_chart_focus():
+    """Dropdown changed by the user: drop the trade highlight (a ledger click sets the symbol itself)."""
+    st.session_state.pop(f"chart_focus:{st.session_state['bt']['id']}", None)
+
+
+def on_ledger_select():
+    """Ledger row selected: chart that trade's contract and zoom to it. A callback runs before the fragment
+    reruns, so it may still set the dropdown's state, which the selectbox above the ledger forbids afterwards."""
+    bt = st.session_state["bt"]
+    focus_key = f"chart_focus:{bt['id']}"
+    rows = st.session_state[f"ledger:{bt['id']}"].selection.rows
+    hit = trade_focus(bt["trades"], rows[0], bt["candles"], bt["default_symbol"]) if rows else None
+    if not hit:  # selection cleared: keep the current view, remove the highlight
+        st.session_state.pop(focus_key, None)
+        return
+    symbol, trade_no = hit
+    seq = st.session_state.get("chart_focus_seq", 0) + 1  # a new value tells the chart to move once
+    st.session_state["chart_focus_seq"] = seq
+    st.session_state[f"chart_symbol:{bt['id']}"] = symbol
+    st.session_state[focus_key] = {"n": trade_no, "seq": seq}
+
+
 def price_section():
-    """Symbol dropdown, candles, trade markers and RSI. A fragment, so changing the symbol reruns only
-    this section and never the backtest; everything it shows comes from `session_state["bt"]`."""
+    """Symbol dropdown, candles, trade markers and RSI; everything comes from `session_state["bt"]`."""
     bt = st.session_state["bt"]
     trades_df, default_symbol = bt["trades"], bt["default_symbol"]
     strikes = (bt["info"] or {}).get("Strikes fetched")  # chain mode: lets the dropdown read each contract's strike
@@ -85,6 +105,7 @@ def price_section():
     # Key per run: a new backtest starts again on the default symbol.
     symbol = st.selectbox("Symbol", options, key=f"chart_symbol:{bt['id']}", disabled=len(options) == 1,
                           format_func=lambda s: symbol_label(s, default_symbol, strikes),
+                          on_change=clear_chart_focus,
                           help="The underlying, then the option contracts fetched during the run. "
                                "Markers show the trades of the selected contract." if len(options) > 1 else None)
     on_default = symbol == default_symbol
@@ -92,7 +113,43 @@ def price_section():
                + (" · markers show every trade, including those on option contracts"
                   if on_default and bt["info"] else ""))
     payload = chart_payload(bt["id"], symbol, bt["candles"], trades_df, default_symbol, bt["start"], bt["resolution"])
-    price_chart(payload, chart_id=f"{bt['id']}:{symbol}", key="price_chart")
+    price_chart(payload, chart_id=f"{bt['id']}:{symbol}", key="price_chart",
+                focus=st.session_state.get(f"chart_focus:{bt['id']}"))
+
+
+def ledger_section():
+    """Trade ledger. Selecting a row charts that trade (see `on_ledger_select`)."""
+    bt = st.session_state["bt"]
+    trades_df = bt["trades"]
+    if not trades_df.empty:
+        money = ["Entry Price", "Exit Price", "Gross PnL", "Brokerage", "Govt Charges", "Total Charges", "Net PnL",
+                 "Cumulative Capital"]
+        styler = trades_df.style.format({**{c: "{:,.2f}" for c in money}, "Return (%)": "{:+.2f}%"})
+        paint = getattr(styler, "map", None) or styler.applymap
+        styler = paint(pnl_style, subset=["Gross PnL", "Net PnL", "Return (%)"])
+        styler = (getattr(styler, "map", None) or styler.applymap)(lambda v: f"color: {AMBER}", subset=["Brokerage", "Govt Charges", "Total Charges"])
+        st.caption("Select a row to show that trade on the chart.")
+        st.dataframe(styler, key=f"ledger:{bt['id']}", on_select=on_ledger_select, selection_mode="single-row",
+                     alt="Ledger of executed trades. Selecting a row shows the trade on the price chart")
+    else:
+        st.dataframe(trades_df, alt="Ledger of executed trades (empty)")
+    st.download_button(
+        label="Download trades report as CSV",
+        data=trades_df.to_csv(index=False).encode("utf-8"),
+        file_name=f"backtest_trades_{bt['label'].replace(':', '_').replace(' ', '_')}.csv",
+        mime="text/csv",
+        icon=":material/download:",
+    )
+
+
+@st.fragment
+def chart_and_ledger():
+    """Price chart and ledger in one fragment: changing the symbol or selecting a trade reruns only
+    this block and never the backtest."""
+    st.subheader("Price chart")
+    price_section()
+    st.subheader("Executed trades")
+    ledger_section()
 
 
 def pick_instrument():
@@ -409,24 +466,4 @@ if bt:
     else:
         st.info("No completed trades generated during this period with current parameters.")
 
-    st.subheader("Price chart")
-    price_section()
-
-    st.subheader("Executed trades")
-    if not trades_df.empty:
-        money = ["Entry Price", "Exit Price", "Gross PnL", "Brokerage", "Govt Charges", "Total Charges", "Net PnL",
-                 "Cumulative Capital"]
-        styler = trades_df.style.format({**{c: "{:,.2f}" for c in money}, "Return (%)": "{:+.2f}%"})
-        paint = getattr(styler, "map", None) or styler.applymap
-        styler = paint(pnl_style, subset=["Gross PnL", "Net PnL", "Return (%)"])
-        styler = (getattr(styler, "map", None) or styler.applymap)(lambda v: f"color: {AMBER}", subset=["Brokerage", "Govt Charges", "Total Charges"])
-        st.dataframe(styler, alt="Ledger of executed trades")
-    else:
-        st.dataframe(trades_df, alt="Ledger of executed trades (empty)")
-    st.download_button(
-        label="Download trades report as CSV",
-        data=trades_df.to_csv(index=False).encode("utf-8"),
-        file_name=f"backtest_trades_{bt['label'].replace(':', '_').replace(' ', '_')}.csv",
-        mime="text/csv",
-        icon=":material/download:",
-    )
+    chart_and_ledger()
