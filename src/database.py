@@ -1,5 +1,8 @@
+import os
 import re
+import threading
 import time
+from collections import deque
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
@@ -12,17 +15,50 @@ COLS = ["epoch", "open", "high", "low", "close", "volume"]
 # Fyers limits per request: ~100 days intraday, ~366 days daily; stay conservative.
 CHUNK_DAYS = {"D": 300, "1D": 300}
 INTRADAY_CHUNK_DAYS = 60
-MIN_REQUEST_GAP = 0.35  # Fyers allows 10 requests/s but only 200/min
-_last_call = 0.0
 DAY = timedelta(days=1)
 
+# Fyers Data API limits (https://fyers.in/api-docs/v3/getting-started/plans-and-limits/):
+# Standard = 5/s, 50/min, 5,000/day; Prime = 10/s, 500/min. Going over the per-minute limit more than
+# 3 times in a day blocks the account for the rest of the day, so stay below it. Prime users can raise
+# the per-minute budget with the FYERS_RATE_PER_MINUTE environment variable (for example 450).
+RATE_PER_MINUTE = int(os.getenv("FYERS_RATE_PER_MINUTE", "45"))
+MIN_REQUEST_GAP = 0.25  # at most 4 requests a second
+RATE_WINDOW = 61.0      # one second more than the 60 s window, for clock skew
+RATE_LIMIT_CODES = (-360, -429)
 
-def _throttle():
-    global _last_call
-    wait = MIN_REQUEST_GAP - (time.monotonic() - _last_call)
-    if wait > 0:
-        time.sleep(wait)
-    _last_call = time.monotonic()
+
+class RateLimitError(Exception):
+    """Fyers refused a request because of the plan's rate limit. Deliberately not a RuntimeError,
+    so callers that skip a failed symbol do not keep sending requests after it."""
+
+
+# One account, one limit: the call log is shared by every session in this process.
+_calls: deque = deque()
+_calls_lock = threading.Lock()
+
+
+def _throttle(on_wait=None):
+    """Block until a request is allowed: >= MIN_REQUEST_GAP after the previous one and fewer than
+    RATE_PER_MINUTE in the last RATE_WINDOW seconds. `on_wait(seconds_left)` is called while waiting."""
+    while True:
+        with _calls_lock:
+            now = time.monotonic()
+            while _calls and now - _calls[0] >= RATE_WINDOW:
+                _calls.popleft()
+            wait = MIN_REQUEST_GAP - (now - _calls[-1]) if _calls else 0.0
+            if len(_calls) >= RATE_PER_MINUTE:
+                wait = max(wait, RATE_WINDOW - (now - _calls[0]))
+            if wait <= 0:
+                _calls.append(now)
+                return
+        if on_wait and wait >= 1:
+            on_wait(wait)
+        time.sleep(min(wait, 1.0))
+
+
+def _is_rate_limit(resp):
+    text = str(resp.get("message") or "").lower()
+    return resp.get("code") in RATE_LIMIT_CODES or "requests/minute" in text or "rate limit" in text
 
 
 def _now_ist():
@@ -152,13 +188,15 @@ def _complete_through(symbol):
 
 # ------------------------------------------------------------------ fetching
 def fetch_history_fyers(fyers_client, symbol, resolution="1", start_date="2026-01-01",
-                        end_date="2026-03-01", use_cache=True, stats=None):
+                        end_date="2026-03-01", use_cache=True, stats=None, on_wait=None):
     """Return candles (with an IST 'timestamp' column) for symbol/resolution/range.
 
     Only date ranges not already recorded in the local DuckDB cache are requested from Fyers
-    (use_cache=False re-fetches the whole range). `stats`, if given, is updated with
+    (use_cache=False re-fetches the whole range). Requests are paced to the plan's rate limit;
+    `on_wait(seconds_left)` is called while waiting for it. `stats`, if given, is updated with
     api_calls / from_cache / fetched counters. Raises RuntimeError if Fyers returned errors and
-    there is no data at all."""
+    there is no data at all, and RateLimitError (after saving what was fetched) if Fyers reports
+    that the rate limit was hit; no further request is sent in that case."""
     stats = stats if stats is not None else {}
     for k in ("api_calls", "from_cache", "fetched"):
         stats.setdefault(k, 0)
@@ -174,31 +212,37 @@ def fetch_history_fyers(fyers_client, symbol, resolution="1", start_date="2026-0
     final_day = _complete_through(symbol)
 
     errors, new_cover = [], []
-    for g_start, g_end in gaps:
-        cur = g_start
-        while cur <= g_end:
-            cur_end = min(cur + step, g_end)
-            _throttle()
-            stats["api_calls"] += 1
-            resp = fyers_client.history(data={
-                "symbol": symbol,
-                "resolution": str(resolution),
-                "date_format": "1",  # epoch
-                "range_from": cur.strftime("%Y-%m-%d"),
-                "range_to": cur_end.strftime("%Y-%m-%d"),
-                "cont_flag": "1",
-            })
-            status = resp.get("s")
-            if status in ("ok", "no_data"):
-                if resp.get("candles"):
-                    chunk = pd.DataFrame([c[:6] for c in resp["candles"]], columns=COLS)
-                    store_candles(symbol, resolution, chunk.drop_duplicates(subset=["epoch"]))
-                if min(cur_end, final_day) >= cur:
-                    new_cover.append((cur, min(cur_end, final_day)))
-            else:
-                errors.append(str(resp.get("message") or resp))
-            cur = cur_end + DAY
-    _add_coverage(symbol, resolution, new_cover)
+    try:
+        for g_start, g_end in gaps:
+            cur = g_start
+            while cur <= g_end:
+                cur_end = min(cur + step, g_end)
+                _throttle(on_wait)
+                stats["api_calls"] += 1
+                resp = fyers_client.history(data={
+                    "symbol": symbol,
+                    "resolution": str(resolution),
+                    "date_format": "1",  # epoch
+                    "range_from": cur.strftime("%Y-%m-%d"),
+                    "range_to": cur_end.strftime("%Y-%m-%d"),
+                    "cont_flag": "1",
+                })
+                status = resp.get("s")
+                if status in ("ok", "no_data"):
+                    if resp.get("candles"):
+                        chunk = pd.DataFrame([c[:6] for c in resp["candles"]], columns=COLS)
+                        store_candles(symbol, resolution, chunk.drop_duplicates(subset=["epoch"]))
+                    if min(cur_end, final_day) >= cur:
+                        new_cover.append((cur, min(cur_end, final_day)))
+                elif _is_rate_limit(resp):
+                    raise RateLimitError(
+                        f"Fyers rate limit reached while fetching {symbol}: {resp.get('message') or resp}\n"
+                        "Data fetched so far is saved. Wait a minute, then run again to continue.")
+                else:
+                    errors.append(str(resp.get("message") or resp))
+                cur = cur_end + DAY
+    finally:
+        _add_coverage(symbol, resolution, new_cover)  # keep progress, also when stopping on the limit
     stats["fetched" if gaps else "from_cache"] += 1
 
     df = fetch_candles_from_db(symbol, resolution, str(start), str(end))

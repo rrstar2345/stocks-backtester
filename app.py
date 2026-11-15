@@ -2,19 +2,21 @@ import uuid
 from datetime import date, time as dtime, timedelta
 
 import pandas as pd
-import plotly.express as px
 import streamlit as st
 
 from src import auth_ui, optionchain, symbols
 from src.auth import get_fyers_client
 from src.backtester import BacktestEngine, ExecConfig, RESOLUTIONS, bar_minutes, warmup_days
+from src.chart_component import price_chart
+from src.chart_data import build_payload
 from src.database import fetch_history_fyers, fetch_candles_from_db
+from src.equity import GREEN, RED, AMBER, equity_curve, gradient_color
 from src.strategies import STRATEGIES
 
 st.set_page_config(page_title="Fyers backtesting dashboard", page_icon=":material/candlestick_chart:", layout="wide")
 st.title("Fyers API v3 DuckDB backtesting engine")
 
-GREEN, RED, AMBER, SLATE = "#16a34a", "#dc2626", "#f59e0b", "#64748b"
+SLATE = "#64748b"
 MODE_SINGLE, MODE_CHAIN = "Single instrument", "Option chain"
 MODE_CHAIN_HELP = ("Option chain: the underlying's close picks the strike on every bar; the strategy runs on that "
                    "option's premium (long entries only, i.e. buying CE / PE). The range is clipped to the expiry date.")
@@ -33,8 +35,43 @@ def delta_for(v, text):
     return 0 if v == 0 else text
 
 
+def resolution_label(res):
+    return "daily" if str(res).upper() in ("D", "1D") else f"{res}-minute"
+
+
 def pnl_style(v):
     return f"color: {sign_color(v)}; font-weight: 600"
+
+
+def equity_option(curve, capital, final):
+    """ECharts option: smooth line, no point markers, gradient area (green / red / amber by net result)."""
+    color = gradient_color(capital, final)
+    daily = curve["time"].dt.normalize().nunique() > 1  # one point per day, or one per bar on a single day
+    return {
+        "grid": {"left": 8, "right": 16, "top": 16, "bottom": 8, "containLabel": True},
+        "tooltip": {"trigger": "axis", "valueFormatter": "₹%,.2f"},
+        "dataset": {"source": curve},
+        "xAxis": {"type": "time", "axisLabel": {"formatter": "{dd} {MMM}" if daily else "{HH}:{mm}"}},
+        "yAxis": {"type": "value", "scale": True, "axisLabel": {"formatter": "₹{value}"}},
+        "series": [{
+            "type": "line", "smooth": True, "smoothMonotone": "x", "showSymbol": False, "symbol": "none",
+            "encode": {"x": "time", "y": "equity", "tooltip": ["equity"]},
+            "lineStyle": {"color": color, "width": 2},
+            "itemStyle": {"color": color},
+            "areaStyle": {"color": {"type": "linear", "x": 0, "y": 0, "x2": 0, "y2": 1, "colorStops": [
+                {"offset": 0, "color": f"{color}66"}, {"offset": 1, "color": f"{color}08"}]}},
+            "markLine": {"silent": True, "symbol": "none", "animation": False,
+                         "label": {"formatter": "Initial capital", "position": "insideEndTop"},
+                         "lineStyle": {"type": "dashed", "color": SLATE, "width": 1},
+                         "data": [{"yAxis": capital}]},
+        }],
+    }
+
+
+@st.cache_data(show_spinner=False, max_entries=16)
+def chart_payload(run_id, symbol, _candles, _trades, default_symbol, start, resolution):
+    """Price chart payload, built once per run and symbol (the underscored frames are not hashed)."""
+    return build_payload(_candles[symbol], _trades, symbol, default_symbol, start, resolution)
 
 
 def pick_instrument():
@@ -258,7 +295,8 @@ if connected:
                         use_cache=not refresh)
                     res = engine.run_chain(chain, strategy, params, cfg)
                     st.session_state["bt"] = dict(
-                        id=uuid.uuid4().hex, resolution=resolution, strategy=strategy.name, params=params,
+                        id=uuid.uuid4().hex, resolution=resolution, start=str(start_date), strategy=strategy.name,
+                        params=params,
                         label=f"{chain_cfg['underlying']} · {chain_cfg['expiry_choice']} expiry · {chain_cfg['strike_choice']}",
                         n=len(chain.underlying), summary=res.summary, trades=res.trades, info=chain.info,
                         data=chain.info["Data source"], candles=res.candles, default_symbol=res.default_symbol)
@@ -281,7 +319,8 @@ if connected:
                 else:
                     res = engine.run(df_hist, strategy, params, cfg, symbol=target_symbol)
                     st.session_state["bt"] = dict(
-                        id=uuid.uuid4().hex, resolution=resolution, strategy=strategy.name, params=params,
+                        id=uuid.uuid4().hex, resolution=resolution, start=str(start_date), strategy=strategy.name,
+                        params=params,
                         label=target_symbol, n=len(df_hist), summary=res.summary, trades=res.trades,
                         info=None, data=stats, candles=res.candles, default_symbol=res.default_symbol)
 
@@ -341,12 +380,21 @@ if bt:
 
     st.subheader("Equity curve")
     if not trades_df.empty:
-        fig = px.line(trades_df, x="Exit Time", y="Cumulative Capital", title="Strategy equity curve (net of charges)",
-                      markers=True, hover_data=["Symbol", "Net PnL", "Exit Reason"])
-        fig.update_traces(line_color=sign_color(net), marker_color=sign_color(net))
-        st.plotly_chart(fig, width="stretch")
+        default_symbol = bt["default_symbol"]
+        bars = bt["candles"][default_symbol]["timestamp"]
+        curve = equity_curve(trades_df, capital, bars[bars >= pd.Timestamp(bt["start"])])
+        st.echarts_chart(equity_option(curve, capital, curve["equity"].iloc[-1]), height=340,
+                         alt=f"Equity curve net of charges, from {inr(capital)} to {inr(summary['Final Capital'])}")
     else:
         st.info("No completed trades generated during this period with current parameters.")
+
+    st.subheader("Price chart")
+    default_symbol = bt["default_symbol"]
+    st.caption(f"{default_symbol} · {resolution_label(bt['resolution'])} candles"
+               + (" · markers show every trade, including those on option contracts" if bt["info"] else ""))
+    payload = chart_payload(bt["id"], default_symbol, bt["candles"], trades_df, default_symbol, bt["start"],
+                            bt["resolution"])
+    price_chart(payload, chart_id=f"{bt['id']}:{default_symbol}", key="price_chart")
 
     st.subheader("Executed trades")
     if not trades_df.empty:

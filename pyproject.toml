@@ -10,8 +10,6 @@ dependencies = [
     "pandas>=2.0.0",
     "numpy>=1.24.0",
     "streamlit>=1.67.0",
-    # Still used by the current equity chart; drop once it moves to ECharts.
-    "plotly>=5.18.0",
     "cryptography>=41.0.0",
     "requests>=2.31.0",
 ]

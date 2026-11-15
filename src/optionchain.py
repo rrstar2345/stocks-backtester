@@ -187,9 +187,18 @@ def _day(ts):
 def build_chain(client, master, exchange, underlying, spot, expiry_choice, strike_choice, sides,
                 resolution, start, end, warmup_days=10, progress=None, expiry_override=None,
                 use_cache=True):
-    say = progress or (lambda frac, text: None)
+    report = progress or (lambda frac, text: None)
+    pos = {"frac": 0.0}
+
+    def say(frac, text):
+        pos["frac"] = frac
+        report(frac, text)
+
     stats = {}
-    fetch = lambda sym, a, b: fetch_history_fyers(client, sym, resolution, a, b, use_cache=use_cache, stats=stats)
+    # fetch_history_fyers paces requests to the Fyers rate limit; show the wait instead of freezing.
+    fetch = lambda sym, a, b: fetch_history_fyers(
+        client, sym, resolution, a, b, use_cache=use_cache, stats=stats,
+        on_wait=lambda s: report(pos["frac"], f"Waiting {s:.0f}s for the Fyers rate limit ({sym})..."))
     today = pd.Timestamp(symbols.today_ist())
     live = live_expiries(master, exchange, underlying, today)
     exp = resolve_expiry(live, parse_expiry_choice(expiry_choice))
