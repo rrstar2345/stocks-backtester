@@ -23,3 +23,7 @@ dev = [
 [tool.uv]
 # Application, not a library: install dependencies only, not the project itself.
 package = false
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]  # lets plain `pytest` import `src`

@@ -9,8 +9,8 @@ from src.auth import get_fyers_client
 from src.backtester import BacktestEngine, ExecConfig, RESOLUTIONS, bar_minutes, warmup_days
 from src.chart_component import price_chart
 from src.chart_data import build_payload, symbol_label, symbol_options, trade_focus
-from src.database import fetch_history_fyers, fetch_candles_from_db
-from src.equity import GREEN, RED, AMBER, equity_curve, gradient_color
+from src.database import AuthError, fetch_history_fyers, fetch_candles_from_db
+from src.equity import GREEN, RED, AMBER, drawdown_curve, equity_curve, exit_reasons, gradient_color
 from src.strategies import STRATEGIES
 
 st.set_page_config(page_title="Fyers backtesting dashboard", page_icon=":material/candlestick_chart:", layout="wide")
@@ -43,15 +43,42 @@ def pnl_style(v):
     return f"color: {sign_color(v)}; font-weight: 600"
 
 
+CHART_GRID = {"left": 8, "right": 16, "top": 16, "bottom": 8, "containLabel": True}
+
+
+def time_axis(curve):
+    """X axis for the equity charts: one point per day, or one per bar on a single day."""
+    daily = curve["time"].dt.normalize().nunique() > 1
+    return {"type": "time", "axisLabel": {"formatter": "{dd} {MMM}" if daily else "{HH}:{mm}"}}
+
+
+def drawdown_option(dd):
+    """ECharts option: drawdown from the equity peak as a red area under zero (straight lines, so the
+    area never rises above the zero line)."""
+    return {
+        "grid": CHART_GRID,
+        "tooltip": {"trigger": "axis", "valueFormatter": "%.2f"},
+        "dataset": {"source": dd},
+        "xAxis": time_axis(dd),
+        "yAxis": {"type": "value", "max": 0, "axisLabel": {"formatter": "{value}%"}},
+        "series": [{
+            "type": "line", "showSymbol": False, "symbol": "none",
+            "encode": {"x": "time", "y": "Drawdown (%)", "tooltip": ["Drawdown (%)"]},
+            "lineStyle": {"color": RED, "width": 1.5},
+            "itemStyle": {"color": RED},
+            "areaStyle": {"color": f"{RED}33"},
+        }],
+    }
+
+
 def equity_option(curve, capital, final):
     """ECharts option: smooth line, no point markers, gradient area (green / red / amber by net result)."""
     color = gradient_color(capital, final)
-    daily = curve["time"].dt.normalize().nunique() > 1  # one point per day, or one per bar on a single day
     return {
-        "grid": {"left": 8, "right": 16, "top": 16, "bottom": 8, "containLabel": True},
+        "grid": CHART_GRID,
         "tooltip": {"trigger": "axis", "valueFormatter": "₹%,.2f"},
         "dataset": {"source": curve},
-        "xAxis": {"type": "time", "axisLabel": {"formatter": "{dd} {MMM}" if daily else "{HH}:{mm}"}},
+        "xAxis": time_axis(curve),
         "yAxis": {"type": "value", "scale": True, "axisLabel": {"formatter": "₹{value}"}},
         "series": [{
             "type": "line", "smooth": True, "smoothMonotone": "x", "showSymbol": False, "symbol": "none",
@@ -378,6 +405,8 @@ if connected:
                         label=f"{chain_cfg['underlying']} · {chain_cfg['expiry_choice']} expiry · {chain_cfg['strike_choice']}",
                         n=len(chain.underlying), summary=res.summary, trades=res.trades, info=chain.info,
                         data=chain.info["Data source"], candles=res.candles, default_symbol=res.default_symbol)
+                except AuthError as e:
+                    auth_ui.show_session_expired(str(e))
                 except Exception as e:
                     st.error(str(e))
                 prog.empty()
@@ -388,6 +417,8 @@ if connected:
                     df_hist = fetch_history_fyers(fyers, target_symbol, resolution=resolution,
                                                   start_date=str(start_date), end_date=str(end_date),
                                                   use_cache=not refresh, stats=stats)
+                except AuthError as e:  # still try the local cache below, which needs no login
+                    auth_ui.show_session_expired(str(e))
                 except Exception as e:
                     st.warning(f"{e} — trying locally cached data.")
                 if df_hist.empty:
@@ -463,6 +494,20 @@ if bt:
         curve = equity_curve(trades_df, capital, bars[bars >= pd.Timestamp(bt["start"])])
         st.echarts_chart(equity_option(curve, capital, curve["equity"].iloc[-1]), height=340,
                          alt=f"Equity curve net of charges, from {inr(capital)} to {inr(summary['Final Capital'])}")
+
+        dd = drawdown_curve(trades_df, capital, bars[bars >= pd.Timestamp(bt["start"])])
+        reasons = exit_reasons(trades_df)
+        dd_col, reasons_col = st.columns([2, 1], gap="large")
+        with dd_col:
+            st.caption("Drawdown from the equity peak")
+            st.echarts_chart(drawdown_option(dd.rename(columns={"drawdown": "Drawdown (%)"})), height=200,
+                             alt=f"Drawdown from the equity peak, deepest {summary['Max Drawdown (%)']:.2f}%")
+        with reasons_col:
+            st.caption("Exits by reason")
+            st.dataframe(reasons, hide_index=True, height="content",
+                         column_config={"Net P/L": st.column_config.NumberColumn(format="₹%,.2f"),
+                                        "Win rate (%)": st.column_config.NumberColumn(format="%.1f")},
+                         alt="Trades, net profit and loss, and win rate for each exit reason")
     else:
         st.info("No completed trades generated during this period with current parameters.")
 

@@ -51,6 +51,20 @@ def request_dialog() -> None:
     st.session_state[OPEN_DIALOG_KEY] = True
 
 
+def reauthenticate() -> None:
+    """Button callback: forget the cached token check (so the sidebar shows the real state) and open the dialog."""
+    _check_session.clear()
+    request_dialog()
+
+
+def show_session_expired(detail: str) -> None:
+    """Error for a token Fyers rejected during a run, with the action that fixes it."""
+    st.error(f"{detail}\n\nLog in again to fetch data that is not in the local cache.",
+             title="Fyers session expired", icon=":material/lock_clock:")
+    st.button("Re-authenticate", key="auth_expired_reauth", type="primary", icon=":material/key:",
+              on_click=reauthenticate)
+
+
 def render_status(status: str, label: str) -> None:
     """Compact connection row for the sidebar."""
     with st.container(horizontal=True, vertical_alignment="center"):

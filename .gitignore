@@ -6,6 +6,7 @@ share/
 *.key
 *.enc
 *.lock
+!uv.lock
 CACHEDIR.TAG
 *.log
 *.duckdb

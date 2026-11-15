@@ -25,11 +25,18 @@ RATE_PER_MINUTE = int(os.getenv("FYERS_RATE_PER_MINUTE", "45"))
 MIN_REQUEST_GAP = 0.25  # at most 4 requests a second
 RATE_WINDOW = 61.0      # one second more than the 60 s window, for clock skew
 RATE_LIMIT_CODES = (-360, -429)
+# Expired / invalid access token (https://fyers.in/api-docs/v3/api/appendix/common-api-error-codes/), plus HTTP 401.
+AUTH_ERROR_CODES = (-8, -15, -16, -17, 401)
 
 
 class RateLimitError(Exception):
     """Fyers refused a request because of the plan's rate limit. Deliberately not a RuntimeError,
     so callers that skip a failed symbol do not keep sending requests after it."""
+
+
+class AuthError(Exception):
+    """Fyers rejected the access token (expired or invalid). Not a RuntimeError either: every further
+    request would fail the same way, so callers must stop and ask for a new login."""
 
 
 # One account, one limit: the call log is shared by every session in this process.
@@ -59,6 +66,10 @@ def _throttle(on_wait=None):
 def _is_rate_limit(resp):
     text = str(resp.get("message") or "").lower()
     return resp.get("code") in RATE_LIMIT_CODES or "requests/minute" in text or "rate limit" in text
+
+
+def _is_auth_error(resp):
+    return resp.get("code") in AUTH_ERROR_CODES
 
 
 def _now_ist():
@@ -238,6 +249,9 @@ def fetch_history_fyers(fyers_client, symbol, resolution="1", start_date="2026-0
                     raise RateLimitError(
                         f"Fyers rate limit reached while fetching {symbol}: {resp.get('message') or resp}\n"
                         "Data fetched so far is saved. Wait a minute, then run again to continue.")
+                elif _is_auth_error(resp):
+                    raise AuthError(
+                        f"Fyers rejected the access token while fetching {symbol}: {resp.get('message') or resp}")
                 else:
                     errors.append(str(resp.get("message") or resp))
                 cur = cur_end + DAY

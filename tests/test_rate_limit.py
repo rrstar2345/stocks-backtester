@@ -97,3 +97,16 @@ def test_other_errors_are_not_rate_limits(clock):
 def test_rate_limit_error_is_not_swallowed_as_a_failed_symbol():
     # optionchain.build_chain skips a symbol on RuntimeError; a rate limit must stop the whole run.
     assert not issubclass(db.RateLimitError, RuntimeError)
+
+
+@pytest.mark.parametrize("code", [-8, -15, -16, -17, 401])
+def test_expired_token_stops_at_once(clock, code):
+    expired = {"s": "error", "code": code, "message": "token problem"}
+    client = FakeFyers(fail_at=2, error=expired)
+    with pytest.raises(db.AuthError, match="NSE:X"):
+        db.fetch_history_fyers(client, "NSE:X", "5", "2026-01-01", "2026-11-14")
+    assert client.calls == 2  # nothing is sent after the rejected token
+
+
+def test_auth_error_is_not_swallowed_as_a_failed_symbol():
+    assert not issubclass(db.AuthError, RuntimeError)

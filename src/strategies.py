@@ -16,8 +16,8 @@ class Param:
     label: str
     kind: str  # "int" | "float" | "choice"
     default: object
-    min: float = None
-    max: float = None
+    min: float | None = None
+    max: float | None = None
     options: list = field(default_factory=list)
 
 
@@ -26,7 +26,7 @@ class Strategy:
     name: str
     params: list
     compute: Callable
-    warmup: Callable = None  # params dict -> bars of history the indicators need
+    warmup: Callable | None = None  # params dict -> bars of history the indicators need
 
 
 def rsi_adx(df, rsi_length=14, rsi_ma_type="EMA", rsi_ma_length=9, adx_length=14,

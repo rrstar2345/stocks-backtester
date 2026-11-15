@@ -9,7 +9,7 @@ A Streamlit app for backtesting a configurable **RSI + ADX** strategy on Indian 
 - **Configurable strategy.** RSI crossing its own EMA/SMA smoothing line, filtered by ADX / DI trend. Parameters are editable in the UI.
 - **Option-chain backtests.** Choose expiry (Current, Previous 1-3, Next 1-3) and strike (ATM, ITM 1-5, OTM 1-5) for CE, PE or both.
 - **Realistic costs and risk.** Target and stop loss (points or %), lot-based position sizing, intraday square-off, flat brokerage per order and govt charges on sell turnover.
-- **Results.** Colour-coded summary cards (gross, charges, net, win rate, profit factor, drawdown), equity curve, trade ledger with per-trade charges, CSV download.
+- **Results.** Summary cards (gross, charges, net, win rate, profit factor, drawdown), equity curve, drawdown chart, exits by reason, an interactive price chart with RSI and trade markers, trade ledger with per-trade charges, CSV download.
 
 ## Setup
 
@@ -26,9 +26,12 @@ The app runs on port 8548 (see `.streamlit/config.toml`). Dependencies live in `
 ### Fyers authentication
 
 1. Create an API app in the Fyers API dashboard and note the App ID and Secret ID.
-2. In the sidebar, enter App ID, Secret ID and Redirect URL, then **Save Credentials** (stored encrypted locally).
-3. Open the login link, authorise, and paste the `auth_code` from the redirect URL.
-4. Click **Generate Access Token**. The token is saved locally. Fyers tokens expire daily, so repeat steps 3-4 each day.
+2. Select **Connect** (or **Re-authenticate**) in the sidebar. The dialog also opens by itself when there is no valid token.
+3. Enter App ID, Secret ID and Redirect URL, then **Save credentials** (stored encrypted locally).
+4. Open the Fyers login, authorise, and paste the `auth_code` from the redirect URL.
+5. Select **Generate access token**. The token is saved locally. Fyers tokens expire daily, so repeat steps 4-5 each day.
+
+If the token expires during a run, the app stops, says so, and offers **Re-authenticate**. Data already in the local cache can still be backtested without a login.
 
 ## Using the app
 
@@ -48,6 +51,16 @@ Data is fetched in this order:
 4. Option candles for those strikes only, checking the local cache first.
 
 The strategy runs on each selected option's own premium (long entries only, so it buys CE / PE). An open position stays in its contract until it exits.
+
+### Using the chart
+
+Under the equity curve, the price chart shows candles for the run's start date onward, with an RSI pane (solid line, dotted smoothing average, guides at 30 / 50 / 70).
+
+- **Markers.** Each trade has an entry marker (`#n · qty`) and an exit marker (`#n · net P/L`, green / red by sign). Hover a marker's bar for the trade's details.
+- **Symbol.** In option-chain mode the dropdown lists the underlying, then CE and PE contracts by strike. The underlying shows every trade; a contract shows only its own trades. Changing it never reruns the backtest.
+- **Ledger.** Select a row to chart that trade's contract and zoom to it. Select the row again to clear it.
+- **Resolution** is fixed to the run's setting and shown above the chart.
+- **Drawdown** is measured per trade from the running equity peak, so its deepest point equals the Max drawdown card.
 
 ### Strategy: RSI cross + ADX trend
 
@@ -93,10 +106,18 @@ src/
   indicators.py        RSI, ADX / DI, EMA, SMA (Wilder conventions)
   strategies.py        Strategy registry and the RSI + ADX strategy
   backtester.py        Simulation engine, charges, performance summary
+  auth_ui.py           Connection status, re-authenticate dialog
+  equity.py            Equity curve, drawdown, exit reasons, colour rule
+  chart_data.py        Price chart payload, symbol dropdown, trade focus
+  chart_component.py   Price chart component (Lightweight Charts)
+assets/                Chart script and the vendored Lightweight Charts library
+tests/                 Unit tests and app smoke tests (synthetic data, no Fyers)
 .streamlit/config.toml Server and theme settings
 pyproject.toml         Dependencies and tool config (uv)
 uv.lock                Locked dependency versions
 ```
+
+Run the tests with `uv run pytest` and the type checker with `uv run ty check app.py src`.
 
 Local files created at runtime (all git-ignored): `market_data.duckdb`, the encrypted credentials and key files, and the access token file.
 
